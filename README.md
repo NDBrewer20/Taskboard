@@ -1,0 +1,248 @@
+# Taskboard
+
+A local-first taskboard for organizing categories and purpose-driven notes.
+
+## Foundation
+
+- React and TypeScript powered by Vite
+- Dexie over IndexedDB for browser-local persistence
+- Dark theme by default
+- No account or server is required
+
+## Run locally
+
+Install Node.js, then run:
+
+```bash
+npm install
+npm run dev
+```
+
+For a production build:
+
+```bash
+npm run build
+```
+
+`npm run typecheck` runs the compiler on its own if you just want the types checked.
+
+## Structure
+
+Three levels. A board holds columns, a column holds rows.
+
+```text
+Project Alpha            <- board, picked from the sidebar
+├── Sprint 1             <- category, drawn as a column
+│   ├── Checklist        <- note, drawn as a row
+│   └── Idea
+└── Sprint 2
+    ├── Checklist
+    └── Checklist
+```
+
+Boards are the sidebar entries. Categories are the columns across the board. Notes are the rows
+stacked inside a column, and their `position` is scoped to the column they sit in.
+
+## Notes and checklists
+
+An **idea** is the default task. A note can carry any number of **named checklists**, each with its
+own steps, its own progress bar and its own count. Adding a checklist to a plain task turns it into a
+checklist note. The circle next to the title is a separate flag that marks the whole note done, no
+matter what the steps say.
+
+```text
+Task
+├── description
+├── Build          <- checklist, 2 of 3
+│   ├── step
+│   ├── step
+│   └── step
+└── Review         <- checklist, 0 of 2
+    ├── step
+    └── step
+```
+
+## Editing
+
+Everything is edited in place. Clicking a note title, a description, a column name, "Add step",
+"Add description" or "New column" swaps that spot for a text box: enter saves, escape backs out,
+clicking away saves. Deleting a note asks in a small bar on the note itself.
+
+Descriptions are the one multi-line field, so there enter makes a new line and **ctrl+enter** is
+what saves. Saving a blank one clears the description and the "Add description" button returns.
+
+No `window.prompt`, `window.confirm` or `window.alert` anywhere. Those are blocked in embedded
+viewers such as the VS Code preview pane, so an action built on them looks dead rather than broken.
+Keep it that way when adding features.
+
+## Dragging
+
+Three things drag, all through the same machinery:
+
+- **Notes** between columns and within one. Grab a card anywhere with the mouse, or use its grip.
+- **Columns** across the board, by the grip in the column head or by a collapsed column's strip.
+- **Checklists** within their note, by the grip in the checklist head. Their steps come with them.
+- **Steps** within a checklist, and between the checklists on the same note.
+
+Checklists and steps are locked to their own note. Drag one off it and the slot disappears and the
+drop is cancelled, rather than quietly applying wherever the slot happened to be last. Notes and
+columns do keep their last slot, so releasing in the gap between two columns still lands.
+
+A press only turns into a drag once it moves 5px, so ordinary clicks still land. On touch a card's
+grip is the only way in, so a swipe still scrolls. A dashed slot shows where the thing will land, the board
+scrolls sideways while dragging a note near an edge, and a column scrolls vertically when a long
+checklist runs past its bottom.
+
+The dashed slot is sized to the thing being dragged, which matters more than it looks. A fixed size
+slot does not make up for the height the dragged element left behind, so everything below it shifts,
+and the element under the pointer changes as you move — the drop target flickers or vanishes
+entirely. Tall things like a checklist of five steps or a note with several checklists made this
+obvious. `measure()` records the size on pointer down and the slot stands in at exactly that size.
+
+Built on pointer events, not the HTML5 drag-and-drop API, for the same reason as the note above:
+native drag is unreliable inside embedded webviews. `moveNote` and `moveColumn` in `src/db.ts`
+renumber positions in a single transaction, so an interrupted drag cannot leave gaps.
+
+## Collapsing
+
+Anything that grows folds up, via the chevron on it:
+
+- a **checklist** collapses to its name, count and progress bar
+- a **note** collapses to its title plus a summary like "4 of 26 steps in 2 checklists"
+- a **column** collapses to a narrow strip with its name running vertically
+
+The chevron always leads, on the left of whatever it folds, which is why a task's sits before its
+checkbox. The body of a task lines up under its title through the `--note-indent` variable on
+`.note-row` — change it in one place and the type label, description, checklists and footer follow.
+
+What is collapsed is view state, not data, so it lives in `localStorage` under `taskboard:collapsed`
+rather than in the database. It survives a reload and is per browser. A collapsed column or checklist
+is not a drop target, since there is nowhere visible to drop into.
+
+## Archive and delete
+
+Nothing on the board deletes anything outright. Boards, columns and tasks each have an **archive**
+button, which takes them off the board and parks them under **Archive** in the sidebar. From there
+each one can be **restored** or **deleted for good**, behind an inline confirm.
+
+Two stages on purpose: archiving is one click and always reversible, while the irreversible step is
+somewhere you have to go looking for.
+
+Archived rows can be worked on together. Tick the box on any row, or the one in the bar to take
+everything, then **Restore** or **Delete** the lot behind a single confirm. Boards are deleted first
+so a cascade cleans up anything else that was picked underneath, and deleting a row a cascade already
+removed is a no-op. The selection is dropped whenever you act on it or leave the archive.
+
+- Archiving a **column** takes its tasks with it, and a **board** takes its columns and their tasks.
+  They are not listed separately in the archive — they come back together.
+- Restoring only puts something back if what it sits in is not archived too. Restore the board
+  first, then the column.
+- **Deleting cascades**: a board takes its columns and every task in them, a column takes its tasks.
+  This one cannot be undone.
+- Checklists and steps are part of their task, so they have no separate archive. Their `X` deletes
+  them directly, and they come back with the task if it is restored.
+
+Archiving stamps an `archivedAt` date rather than moving rows, so the schema does not change and
+nothing is copied anywhere. An absent `archivedAt` simply means active.
+
+## Filtering
+
+**Active only** hides completed notes, and also hides any column whose tasks are *all* completed —
+finished columns get out of the way. A column with no tasks at all stays put, so there is still
+somewhere to drop things.
+
+## Templates
+
+New boards are created from a template rather than from a fixed seed, so the app starts empty.
+Templates live in `src/templates.ts` as plain data — a board name, a description, and the columns
+and notes to create. Add an entry to `boardTemplates` and it shows up in the create dialog.
+
+Current templates: Blank, Sprints, Kanban, Weekly.
+
+## Storage
+
+The database layer lives in `src/db.ts` and the UI should use that boundary rather than reaching
+into IndexedDB directly. The schema is versioned:
+
+- **v1** — flat categories and notes
+- **v2** — adds the board level above categories, backfills `items` on every note
+- **v3** — one-time wipe that clears the old demo data
+- **v4** — folds each note's flat `items` array into a named checklist, so a note can hold several
+
+Version 3 exists only to drop the test rows from earlier development. Once you have loaded the app
+once it has already run, and the block can be deleted from `src/db.ts` before anyone else uses this.
+
+## Hosting it on Unraid
+
+The app is a pile of static files. There is no server, no API and no database on the host, so any
+static web server will do.
+
+### Read this before you set it up
+
+**Hosting does not share your data.** Everything lives in the browser's IndexedDB on whatever device
+you are looking at. Serving the app from Unraid means every device can *load* it, but each one gets
+its own separate, empty taskboard. Nothing syncs and nothing is backed up on the server. If what you
+want is one taskboard you can reach from the sofa and the desk, this alone will not give you that —
+that needs a real backend, which this project does not have.
+
+**IndexedDB is scoped to the exact origin.** `http://taskboard.lan` and `http://192.168.1.50:8080`
+are different origins, so they hold different data. Pick one address and stick to it, or it will
+look like your boards vanished.
+
+### Build and serve
+
+```bash
+docker compose up -d --build
+```
+
+That builds the static files and serves them with nginx on port 8080. On Unraid either use the
+**Docker Compose Manager** plugin pointed at a clone of this repo, or build the image once and add a
+container by hand. If you would rather not build on the server, run `npm run build` on your desktop
+and mount the resulting `dist/` into any static web container instead:
+
+```
+/mnt/user/appdata/taskboard/dist  ->  /usr/share/nginx/html   (read only)
+```
+
+### The custom hostname
+
+The container does not care what name you use — the name has to come from whatever answers DNS on
+your LAN. Pick one:
+
+1. **Your router, Pi-hole or AdGuard Home** (best, works on every device). Add an A record or DNS
+   rewrite pointing your chosen name at the Unraid box's IP. In AdGuard that is *Filters → DNS
+   rewrites*; in Pi-hole, *Local DNS → DNS Records*. Then browse to `http://taskboard.lan:8080`.
+2. **Nginx Proxy Manager** (an Unraid Community App) if you want it on port 80 with no port in the
+   URL, or several apps behind one name. Point the proxy host at `unraid-ip:8080`.
+3. **A hosts file entry** on one machine, for a quick try. Does not scale past that machine.
+
+Two naming traps worth avoiding:
+
+- **Do not use `.local`.** It is reserved for mDNS/Bonjour, and normal DNS records under it behave
+  erratically, especially on macOS and iOS.
+- **Do not invent a TLD that turns out to be real.** `.dev` is a real, HSTS preloaded TLD, so
+  browsers force HTTPS on it and a plain http host will simply refuse to load. `.lan` is the common
+  choice, and `.home.arpa` is the one actually reserved for this (RFC 8375).
+
+### About HTTPS
+
+Plain http over your LAN is fine here, and the app is built to work that way — but that took a
+deliberate fix worth knowing about. `crypto.randomUUID()`, which minted every id in the app, only
+exists in a **secure context**. `http://localhost` counts as one; `http://taskboard.lan` does not.
+Served over plain http on a hostname, `crypto.randomUUID` is `undefined` and *nothing can be
+created at all* — no boards, columns, tasks or steps. `newId()` in `src/db.ts` now falls back to
+`crypto.getRandomValues`, which has no such restriction. Keep using it rather than reaching for
+`crypto.randomUUID` directly, or self hosting breaks again.
+
+If you do want HTTPS anyway, put it on the reverse proxy, not this container.
+
+### One more thing
+
+The stylesheet pulls DM Sans and Space Grotesk from Google Fonts, so a machine with no internet
+falls back to system fonts. Everything still works, it just looks different. Inline the fonts if
+that matters to you.
+
+## Still missing
+
+Renaming a board, and JSON export/import. Worth having before trusting this with anything you could
+not rebuild.

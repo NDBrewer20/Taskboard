@@ -1,0 +1,8 @@
+services:
+  taskboard:
+    build: .
+    container_name: taskboard
+    # change the left hand number if 8080 is already taken on your unraid box
+    ports:
+      - "8080:80"
+    restart: unless-stopped

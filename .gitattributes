@@ -1,0 +1,7 @@
+# this repo gets cloned onto linux to build the image, so keep the files
+# docker and nginx read as LF no matter what windows does locally
+* text=auto
+Dockerfile text eol=lf
+*.conf      text eol=lf
+*.yml       text eol=lf
+*.sh        text eol=lf
