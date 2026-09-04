@@ -16,6 +16,9 @@ export function newId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// what v5 briefly stored, a step that carried whole checklists rather than plain sub steps
+type SubListItem = ChecklistItem & { checklists?: Checklist[] };
+
 class TaskboardDatabase extends Dexie {
   boards!: Table<Board, string>;
   categories!: Table<Category, string>;
@@ -71,12 +74,63 @@ class TaskboardDatabase extends Dexie {
         delete (note as { items?: ChecklistItem[] }).items;
       });
     });
+
+    // v5 gave every step its own checklists array, sub steps were a group of their own then
+    this.version(5).stores({
+      boards: "id, position",
+      categories: "id, boardId, position",
+      notes: "id, categoryId, completed, position, updatedAt",
+    }).upgrade(async (tx) => {
+      await tx.table("notes").toCollection().modify((note) => {
+        for (const list of (note.checklists ?? []) as Checklist[]) {
+          for (const item of list.items) (item as SubListItem).checklists ??= [];
+        }
+      });
+    });
+
+    // v6 drops that. a step owns its sub steps directly now, so whatever sat in the groups
+    // hanging off a step gets pulled up into the step itself, in the order it was in
+    this.version(6).stores({
+      boards: "id, position",
+      categories: "id, boardId, position",
+      notes: "id, categoryId, completed, position, updatedAt",
+    }).upgrade(async (tx) => {
+      const foldIn = (items: ChecklistItem[]) => {
+        for (const item of items) {
+          const legacy = (item as SubListItem).checklists;
+          delete (item as SubListItem).checklists;
+          item.items = legacy?.flatMap((list) => list.items) ?? item.items ?? [];
+          foldIn(item.items);
+        }
+      };
+      await tx.table("notes").toCollection().modify((note) => {
+        for (const list of (note.checklists ?? []) as Checklist[]) foldIn(list.items);
+      });
+    });
   }
 }
 
 export const database = new TaskboardDatabase();
 
+// dexie types an update by walking every key path on the row, and a checklist that can
+// hold checklists sends that walk in circles. writes go through a loose view of the table
+// so the walk stops, everything reading a note still gets the real shape back
+const noteWrites = database.notes as unknown as Table<Record<string, unknown>, string>;
+
+export const updateNote = (id: string, changes: Partial<Note>) => noteWrites.update(id, changes);
+
 export const columnColors = ["coral", "teal", "gold", "violet", "sky"];
+
+// a column is 302px until you drag its edge, and it cannot go under what a checklist row
+// actually needs. that floor is the column padding and border (26) + the note's (26) +
+// the indent the checklist sits at (52) + the group's own border and padding (22) + the
+// row itself, which is about 100px of fold, handle, box and buttons before any text (170).
+// go under it and the row runs past the edge of the column and gets cut off
+export const defaultColumnWidth = 302;
+export const columnWidthRange = { min: 296, max: 900 };
+
+export const clampColumnWidth = (width: number) =>
+  Math.round(Math.max(columnWidthRange.min, Math.min(columnWidthRange.max, width)));
 
 export function buildBoard(name: string, position: number): Board {
   return { id: newId(), name, position, createdAt: new Date().toISOString() };
@@ -105,8 +159,52 @@ export function buildChecklist(name: string, items: string[] = []): Checklist {
 }
 
 export function buildItem(text: string): ChecklistItem {
-  return { id: newId(), text, completed: false };
+  return { id: newId(), text, completed: false, items: [] };
 }
+
+/* a step holds sub steps, so nothing below can assume one level. all of it rebuilds the
+   branch it touches rather than mutating, which is what gets written back to dexie. */
+
+// runs every step under these ones through a change, however deep they go
+export function mapItems(items: ChecklistItem[], change: (item: ChecklistItem) => ChecklistItem): ChecklistItem[] {
+  return items.map((item) => change({ ...item, items: mapItems(item.items, change) }));
+}
+
+// every step in a note, nested ones included. the counts run off this
+export function allItems(items: ChecklistItem[]): ChecklistItem[] {
+  return items.flatMap((item) => [item, ...allItems(item.items)]);
+}
+
+export const noteItems = (lists: Checklist[]) => lists.flatMap((list) => allItems(list.items));
+
+export const findItem = (lists: Checklist[], itemId: string) =>
+  noteItems(lists).find((item) => item.id === itemId);
+
+// pulling a step out takes its sub steps with it
+export function dropItem(items: ChecklistItem[], itemId: string): ChecklistItem[] {
+  return items
+    .filter((item) => item.id !== itemId)
+    .map((item) => ({ ...item, items: dropItem(item.items, itemId) }));
+}
+
+export const insertAt = <Row,>(rows: Row[], index: number, row: Row) =>
+  [...rows.slice(0, index), row, ...rows.slice(index)];
+
+// owner is a checklist or a step, whichever the pointer was over when it landed
+export function placeItem(items: ChecklistItem[], ownerId: string, moving: ChecklistItem, index: number): ChecklistItem[] {
+  return items.map((item) => item.id === ownerId
+    ? { ...item, items: insertAt(item.items, index, moving) }
+    : { ...item, items: placeItem(item.items, ownerId, moving, index) });
+}
+
+// same two, lifted to the note so a step can move between its checklists as well
+export const dropNoteItem = (lists: Checklist[], itemId: string) =>
+  lists.map((list) => ({ ...list, items: dropItem(list.items, itemId) }));
+
+export const placeNoteItem = (lists: Checklist[], ownerId: string, moving: ChecklistItem, index: number) =>
+  lists.map((list) => list.id === ownerId
+    ? { ...list, items: insertAt(list.items, index, moving) }
+    : { ...list, items: placeItem(list.items, ownerId, moving, index) });
 
 // builds the whole board -> column -> note tree from a template in one shot
 export async function createBoardFromTemplate(template: BoardTemplate, name: string, position: number) {
@@ -147,7 +245,7 @@ export async function moveNote(noteId: string, toCategoryId: string, toIndex: nu
     const renumber = (rows: Note[], categoryId: string) =>
       Promise.all(rows.map((row, index) => row.position === index && row.categoryId === categoryId
         ? undefined
-        : database.notes.update(row.id, { position: index, categoryId })));
+        : updateNote(row.id, { position: index, categoryId })));
 
     if (note.categoryId === toCategoryId) {
       const rows = await ordered(toCategoryId);
@@ -161,7 +259,7 @@ export async function moveNote(noteId: string, toCategoryId: string, toIndex: nu
     target.splice(Math.max(0, Math.min(toIndex, target.length)), 0, note);
     await renumber(source, note.categoryId);
     await renumber(target, toCategoryId);
-    await database.notes.update(noteId, { updatedAt: new Date().toISOString() });
+    await updateNote(noteId, { updatedAt: new Date().toISOString() });
   });
 }
 
@@ -192,7 +290,7 @@ export const setColumnArchived = (id: string, archived: boolean) =>
   database.categories.update(id, archiveStamp(archived));
 
 export const setNoteArchived = (id: string, archived: boolean) =>
-  database.notes.update(id, archiveStamp(archived));
+  updateNote(id, archiveStamp(archived));
 
 // deleting a board takes its columns and their notes with it
 export async function deleteBoardForever(boardId: string) {

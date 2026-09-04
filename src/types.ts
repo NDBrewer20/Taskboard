@@ -9,22 +9,26 @@ export type Board = {
   archivedAt?: string;
 };
 
-// a column on a board
+// a column on a board. width is only set once it has been dragged wider or narrower,
+// unset means it sits at whatever the stylesheet calls the default
 export type Category = {
   id: string;
   boardId: string;
   name: string;
   color: string;
   position: number;
+  width?: number;
   createdAt: string;
   archivedAt?: string;
 };
 
-// the sub steps that give a checklist its progress
+// the sub steps that give a checklist its progress. a step holds steps of its own, so
+// anything that needs breaking down further just indents under it instead of a new group
 export type ChecklistItem = {
   id: string;
   text: string;
   completed: boolean;
+  items: ChecklistItem[];
 };
 
 // a named group of steps, a note can carry several of them

@@ -72,7 +72,13 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 
 /* the columns are the categories, laid out side by side */
 .board-columns { display: flex; align-items: flex-start; gap: 14px; padding: 24px 0 8px; overflow-x: auto; }
-.column { flex: 0 0 302px; max-width: 302px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); display: flex; flex-direction: column; max-height: calc(100vh - 130px); }
+.column { --column-width: 302px; position: relative; flex: 0 0 var(--column-width); max-width: var(--column-width); border: 1px solid var(--line); border-radius: 11px; background: var(--surface); display: flex; flex-direction: column; max-height: calc(100vh - 130px); }
+
+/* the strip down the right edge is what you drag to widen the column */
+.column-grip { position: absolute; top: 0; right: -8px; width: 14px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; }
+.column-grip::after { content: ""; position: absolute; top: 12px; bottom: 12px; left: 6px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+.column:hover .column-grip::after { background: #35333f; }
+.column-grip:hover::after, .column-grip.sizing::after { background: var(--coral); }
 .column-head { display: flex; align-items: center; gap: 6px; padding: 13px 9px 12px 10px; border-bottom: 1px solid var(--line); }
 .column-head h2 { font-family: 'Space Grotesk'; font-size: 14px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--coral); flex: 0 0 auto; }
@@ -118,12 +124,25 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 .progress span { display: block; height: 100%; background: var(--teal); border-radius: 2px; transition: width .25s; }
 .check-item { display: flex; align-items: center; gap: 3px; }
 .check-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; text-align: left; background: transparent; color: var(--muted); font-size: 12px; padding: 2px 0; }
+.check-toggle span { overflow-wrap: break-word; min-width: 0; }
 .check-toggle:hover { color: var(--ink); }
 .check-toggle svg { flex: 0 0 auto; }
 .check-item.done .check-toggle { color: var(--faint); }
 .check-item.done .check-toggle span { text-decoration: line-through; text-decoration-color: var(--faint); }
 .check-item.done .check-toggle svg { color: var(--teal); }
 .add-item.indented { justify-self: start; margin-top: 2px; }
+
+/* a step and whatever indents under it move as one, so they share a wrapper */
+.check-item-group { display: grid; gap: 4px; }
+.fold-spacer { width: 16px; flex: 0 0 auto; }
+.item-fold { opacity: 1 !important; }
+.check-item .checklist-count { margin-left: 4px; }
+.sub-steps { margin-left: 9px; padding-left: 11px; border-left: 1px solid #2f2d3a; display: grid; gap: 4px; }
+.sub-steps.tight { margin-left: 3px; padding-left: 6px; }
+/* the spacer only lines text up under the chevron, deep down the width is worth more */
+.sub-steps.tight .fold-spacer { width: 4px; }
+.sub-steps .step-composer { margin-top: 1px; }
+.sub-steps .check-toggle { font-size: 11.5px; }
 
 .note-footer { margin-top: 12px; padding-left: var(--note-indent); display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--faint); font-size: 10px; }
 .footer-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }

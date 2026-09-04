@@ -1,11 +1,18 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, Pencil, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
-import { buildChecklist, buildColumn, buildItem, buildNote, createBoardFromTemplate, database, deleteBoardForever,
-  deleteColumnForever, deleteNoteForever, moveColumn, moveNote, setBoardArchived, setColumnArchived, setNoteArchived } from "./db";
+import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
+import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
+  database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
+  mapItems, moveColumn, moveNote, noteItems, placeNoteItem, setBoardArchived, setColumnArchived, setNoteArchived,
+  updateNote } from "./db";
 import { boardTemplates } from "./templates";
-import type { Board, Category, Checklist, Note, NoteType } from "./types";
+import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
 
 const typeLabels: Record<NoteType, string> = { checklist: "Checklist", direction: "Direction", descriptor: "Descriptor", idea: "Idea" };
+
+// everything a search should reach inside a note, sub steps as well as the top ones
+const listText = (lists: Checklist[]) => lists
+  .map((list) => `${list.name} ${allItems(list.items).map((item) => item.text).join(" ")}`)
+  .join(" ");
 
 // what is currently swapped out for a text box
 type Editing = { kind: "column" | "note" | "body" | "list" | "newColumn" | "newStep" | "newList"; id: string };
@@ -71,6 +78,7 @@ function App() {
   const [showArchive, setShowArchive] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [drag, setDrag] = useState<{ kind: DragKind; id: string; noteId: string; title: string; x: number; y: number; width: number; height: number; container: string; index: number } | null>(null);
+  const [sizing, setSizing] = useState<{ id: string; width: number } | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
   const pending = useRef<{ kind: DragKind; id: string; noteId: string; title: string; width: number; height: number; startX: number; startY: number; active: boolean } | null>(null);
@@ -123,8 +131,7 @@ function App() {
       if (note.archivedAt) return false;
       if (!showCompleted && note.completed) return false;
       if (!needle) return true;
-      const steps = note.checklists.map((list) => `${list.name} ${list.items.map((item) => item.text).join(" ")}`).join(" ");
-      return `${note.title} ${note.content} ${steps}`.toLowerCase().includes(needle);
+      return `${note.title} ${note.content} ${listText(note.checklists)}`.toLowerCase().includes(needle);
     });
   }, [notes, query, showCompleted]);
 
@@ -153,6 +160,17 @@ function App() {
     });
   }
 
+  // adding a sub list to a folded step would drop it out of sight, so open it back up
+  function expand(id: string) {
+    setCollapsed((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next])); } catch { /* private mode, fine */ }
+      return next;
+    });
+  }
+
   const isEditing = (kind: Editing["kind"], id: string) => editing?.kind === kind && editing.id === id;
   const startEdit = (kind: Editing["kind"], id: string) => { setConfirming(""); setEditing({ kind, id }); };
   const cancelEdit = () => setEditing(null);
@@ -172,12 +190,54 @@ function App() {
 
   function beginItemDrag(event: React.PointerEvent, note: Note, itemId: string, text: string) {
     if (event.button !== 0) return;
-    pending.current = { kind: "item", id: itemId, noteId: note.id, title: text, ...measure(event, "[data-item-id]"), startX: event.clientX, startY: event.clientY, active: false };
+    // measure the row, not the wrapper, so the slot stays step sized even when the step
+    // is dragging a stack of sub steps along with it
+    pending.current = { kind: "item", id: itemId, noteId: note.id, title: text, ...measure(event, ".check-item"), startX: event.clientX, startY: event.clientY, active: false };
   }
 
   function beginListDrag(event: React.PointerEvent, note: Note, list: Checklist) {
     if (event.button !== 0) return;
     pending.current = { kind: "list", id: list.id, noteId: note.id, title: list.name, ...measure(event, "[data-checklist-id]"), startX: event.clientX, startY: event.clientY, active: false };
+  }
+
+  // the width a column is drawn at, mid drag that is the live one rather than the stored one.
+  // clamped on the way out too, so a width saved under an older floor gets pulled back up
+  const widthOf = (category: Category) =>
+    clampColumnWidth((sizing?.id === category.id ? sizing.width : category.width) ?? defaultColumnWidth);
+
+  // dragging the edge sizes the column live and only writes when you let go, so the board
+  // is not saving on every pixel
+  function beginResize(event: React.PointerEvent, category: Category) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.clientX;
+    const startWidth = widthOf(category);
+    const widthAt = (clientX: number) => clampColumnWidth(startWidth + clientX - startX);
+
+    const onMove = (moved: PointerEvent) => setSizing({ id: category.id, width: widthAt(moved.clientX) });
+    const onUp = async (ended: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      const width = widthAt(ended.clientX);
+      setSizing(null);
+      if (width === (category.width ?? defaultColumnWidth)) return;
+      await database.categories.update(category.id, { width });
+      refresh();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  // double click the edge and the column goes back to the default width
+  async function resetWidth(category: Category) {
+    if (category.width === undefined) return;
+    await database.categories.update(category.id, { width: undefined });
+    refresh();
   }
 
   function beginColumnDrag(event: React.PointerEvent, category: Category) {
@@ -219,12 +279,18 @@ function App() {
       return { container: owner.dataset.noteId!, index: insertionPoint(rows, y, "y") };
     }
 
-    // a step crosses between the checklists on its own note, but never onto another note
-    const list = element.closest<HTMLElement>("[data-checklist-id]");
-    if (!list || list.classList.contains("collapsed")) return null;
-    if (list.closest<HTMLElement>("[data-note-id]")?.dataset.noteId !== held.noteId) return null;
-    const rows = [...list.querySelectorAll<HTMLElement>("[data-item-id]")].filter((row) => row.dataset.itemId !== held.id);
-    return { container: list.dataset.checklistId!, index: insertionPoint(rows, y, "y") };
+    // a step drops into whatever holds steps, a checklist or another step, anywhere on its
+    // own note but never onto a different one. the row under the pointer decides which
+    // container is in play, so passing over a step reorders its siblings instead of diving in
+    // over a row it is that row's own container, anywhere else it is whatever the pointer
+    // is sitting in, which is how the indent under a step counts as dropping into it
+    const row = element.closest<HTMLElement>(".check-item")?.parentElement;
+    const owner = (row ?? element).closest<HTMLElement>("[data-step-owner]");
+    if (!owner || owner.classList.contains("collapsed")) return null;
+    if (owner.closest<HTMLElement>("[data-note-id]")?.dataset.noteId !== held.noteId) return null;
+    const rows = [...owner.querySelectorAll<HTMLElement>("[data-item-id]")]
+      .filter((step) => step.dataset.itemId !== held.id && step.parentElement?.closest("[data-step-owner]") === owner);
+    return { container: owner.dataset.stepOwner!, index: insertionPoint(rows, y, "y") };
   }
 
   useEffect(() => {
@@ -279,21 +345,20 @@ function App() {
         if (!owner || !moving) return;
         const rest = owner.checklists.filter((list) => list.id !== held.id);
         const checklists = [...rest.slice(0, spot.index), moving, ...rest.slice(spot.index)];
-        await database.notes.update(owner.id, { checklists, updatedAt: new Date().toISOString() });
+        await updateNote(owner.id, { checklists, updatedAt: new Date().toISOString() });
         refresh();
         return;
       }
 
       // read the note back rather than trusting a value captured when the listener was set up
       const note = await database.notes.get(held.noteId);
-      const item = note?.checklists.flatMap((list) => list.items).find((row) => row.id === held.id);
+      const item = note && findItem(note.checklists, held.id);
       if (!note || !item) return;
 
-      const emptied = note.checklists.map((list) => ({ ...list, items: list.items.filter((row) => row.id !== held.id) }));
-      const checklists = emptied.map((list) => list.id !== spot.container ? list : {
-        ...list, items: [...list.items.slice(0, spot.index), item, ...list.items.slice(spot.index)],
-      });
-      await database.notes.update(note.id, { checklists, updatedAt: new Date().toISOString() });
+      // pull the step out of wherever it sat, then put it back under what it was dropped
+      // on. its own sub steps ride along on the object being moved
+      const checklists = placeNoteItem(dropNoteItem(note.checklists, held.id), spot.container, item, spot.index);
+      await updateNote(note.id, { checklists, updatedAt: new Date().toISOString() });
       refresh();
     }
 
@@ -382,20 +447,20 @@ function App() {
   async function renameNote(note: Note, title: string) {
     cancelEdit();
     if (!title.trim() || title.trim() === note.title) return;
-    await database.notes.update(note.id, { title: title.trim(), updatedAt: new Date().toISOString() }); refresh();
+    await updateNote(note.id, { title: title.trim(), updatedAt: new Date().toISOString() }); refresh();
   }
 
   // the description is free text, so an empty one just clears it
   async function saveBody(note: Note, content: string) {
     cancelEdit();
     if (content.trim() === note.content) return;
-    await database.notes.update(note.id, { content: content.trim(), updatedAt: new Date().toISOString() }); refresh();
+    await updateNote(note.id, { content: content.trim(), updatedAt: new Date().toISOString() }); refresh();
   }
 
   // the note flag stands on its own, ticking sub steps is what tracks progress
   async function toggleNote(note: Note) {
     const now = new Date().toISOString();
-    await database.notes.update(note.id, {
+    await updateNote(note.id, {
       completed: !note.completed, completedAt: note.completed ? undefined : now, updatedAt: now,
     });
     refresh();
@@ -495,18 +560,24 @@ function App() {
   };
 
   async function saveChecklists(note: Note, checklists: Checklist[]) {
-    await database.notes.update(note.id, { checklists, updatedAt: new Date().toISOString() }); refresh();
+    await updateNote(note.id, { checklists, updatedAt: new Date().toISOString() }); refresh();
   }
 
   const withList = (note: Note, listId: string, change: (list: Checklist) => Checklist) =>
     note.checklists.map((list) => (list.id === listId ? change(list) : list));
+
+  // ids are unique across the note, so this reaches a step however deep it sits
+  const withItem = (note: Note, itemId: string, change: (item: ChecklistItem) => ChecklistItem) =>
+    note.checklists.map((list) => ({
+      ...list, items: mapItems(list.items, (item) => (item.id === itemId ? change(item) : item)),
+    }));
 
   // a note can carry several named checklists, and gaining one makes it a checklist note
   async function addChecklist(note: Note, name: string) {
     cancelEdit();
     if (!name.trim()) return;
     const list = buildChecklist(name.trim());
-    await database.notes.update(note.id, { checklists: [...note.checklists, list], type: "checklist", updatedAt: new Date().toISOString() });
+    await updateNote(note.id, { checklists: [...note.checklists, list], type: "checklist", updatedAt: new Date().toISOString() });
     await refresh();
     startEdit("newStep", list.id);
   }
@@ -522,20 +593,110 @@ function App() {
     saveChecklists(note, note.checklists.filter((list) => list.id !== listId));
   }
 
-  async function addItem(note: Note, list: Checklist, text: string) {
+  // owner is the checklist for a top level step, or the step it indents under. either way
+  // the new one goes on the end and the composer stays open for the next
+  async function addItem(note: Note, ownerId: string, text: string) {
     cancelEdit();
     if (!text.trim()) return;
-    await saveChecklists(note, withList(note, list.id, (current) => ({ ...current, items: [...current.items, buildItem(text.trim())] })));
-    startEdit("newStep", list.id);
+    const checklists = placeNoteItem(note.checklists, ownerId, buildItem(text.trim()), Number.MAX_SAFE_INTEGER);
+    await saveChecklists(note, checklists);
+    expand(ownerId);
+    startEdit("newStep", ownerId);
   }
 
-  const toggleItem = (note: Note, listId: string, itemId: string) =>
-    saveChecklists(note, withList(note, listId, (list) => ({
-      ...list, items: list.items.map((item) => (item.id === itemId ? { ...item, completed: !item.completed } : item)),
-    })));
+  const toggleItem = (note: Note, itemId: string) =>
+    saveChecklists(note, withItem(note, itemId, (item) => ({ ...item, completed: !item.completed })));
 
-  const removeItem = (note: Note, listId: string, itemId: string) =>
-    saveChecklists(note, withList(note, listId, (list) => ({ ...list, items: list.items.filter((item) => item.id !== itemId) })));
+  // removing a step takes its sub steps with it, they only exist under it
+  const removeItem = (note: Note, itemId: string) =>
+    saveChecklists(note, dropNoteItem(note.checklists, itemId));
+
+  // one checklist. the count and the bar track its top level steps, what indents under
+  // them rolls up on the step itself rather than in here
+  function renderChecklist(note: Note, list: Checklist) {
+    const done = list.items.filter((item) => item.completed).length;
+    const listShut = isCollapsed(list.id);
+
+    return <div className={`checklist-group ${listShut ? "collapsed" : ""}`} data-checklist-id={list.id} data-step-owner={list.id}>
+      <div className="checklist-head">
+        {isEditing("list", list.id)
+          ? <InlineInput value={list.name} placeholder="Checklist name"
+              onCommit={(text) => renameChecklist(note, list, text)} onCancel={cancelEdit} />
+          : <><button className="row-action" onClick={() => toggleCollapse(list.id)} aria-label={`${listShut ? "Expand" : "Collapse"} ${list.name}`}>
+                {listShut ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>
+              <button className="checklist-name" onClick={() => startEdit("list", list.id)}>{list.name}</button>
+              <span className="checklist-count">{done} of {list.items.length}</span>
+              <button className="row-action drag-handle" onPointerDown={(event) => beginListDrag(event, note, list)} aria-label={`Move ${list.name}`}><GripVertical size={13} /></button>
+              <button className="row-action" onClick={() => setConfirming(list.id)} aria-label={`Delete ${list.name}`}><X size={13} /></button></>}
+      </div>
+
+      {confirming === list.id && <div className="confirm-bar tight">
+        <span>Delete this checklist?</span>
+        <button className="danger-button" onClick={() => deleteChecklist(note, list.id)}>Delete</button>
+        <button className="ghost-button small" onClick={() => setConfirming("")}>Cancel</button>
+      </div>}
+
+      {list.items.length > 0 && <div className="progress">
+        <span style={{ width: `${Math.round((done / list.items.length) * 100)}%` }} />
+      </div>}
+
+      {!listShut && renderSteps(note, list.id, list.items, 0)}
+    </div>;
+  }
+
+  // the steps under a checklist or under another step, with their drop slots and the
+  // composer that adds to this level. the same markup all the way down
+  function renderSteps(note: Note, ownerId: string, source: ChecklistItem[], depth: number) {
+    const steps = source.filter((item) => !(drag?.kind === "item" && item.id === drag.id));
+    const slotAt = (at: number) => drag?.kind === "item" && drag.container === ownerId && drag.index === at;
+
+    return <>
+      {steps.map((item, index) => <Fragment key={item.id}>
+        {slotAt(index) && <div className="drop-slot step" style={{ height: drag?.height }} />}
+        {renderItem(note, item, depth)}
+      </Fragment>)}
+      {slotAt(steps.length) && <div className="drop-slot step" style={{ height: drag?.height }} />}
+
+      {isEditing("newStep", ownerId)
+        ? <div className="step-composer">
+            <Square size={15} />
+            <InlineInput placeholder={depth ? "Sub step, then enter" : "Step, then enter"}
+              onCommit={(text) => addItem(note, ownerId, text)} onCancel={cancelEdit} />
+          </div>
+        : !depth && <button className="add-item indented" onClick={() => startEdit("newStep", ownerId)}><Plus size={13} />Add step</button>}
+    </>;
+  }
+
+  // a step, plus whatever indents under it. the wrapper is what holds the sub steps, so
+  // folding the step hides the lot and dragging it takes them along
+  function renderItem(note: Note, item: ChecklistItem, depth: number) {
+    const itemShut = isCollapsed(item.id);
+    const nested = allItems(item.items);
+    const nestedDone = nested.filter((step) => step.completed).length;
+    const composing = isEditing("newStep", item.id);
+
+    return <div className={`check-item-group ${itemShut ? "collapsed" : ""}`} data-item-id={item.id}>
+      <div className={`check-item ${item.completed ? "done" : ""}`}>
+        {item.items.length > 0
+          ? <button className="row-action item-fold" onClick={() => toggleCollapse(item.id)} aria-label={`${itemShut ? "Expand" : "Collapse"} the steps under ${item.text}`}>
+              {itemShut ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button>
+          : <span className="fold-spacer" />}
+        <button className="row-action drag-handle" onPointerDown={(event) => beginItemDrag(event, note, item.id, item.text)} aria-label={`Move ${item.text}`}><GripVertical size={12} /></button>
+        <button className="check-toggle" onClick={() => toggleItem(note, item.id)}>
+          {item.completed ? <SquareCheckBig size={15} /> : <Square size={15} />}<span>{item.text}</span>
+        </button>
+        {nested.length > 0 && <span className="checklist-count">{nestedDone} of {nested.length}</span>}
+        <button className="row-action" onClick={() => { expand(item.id); startEdit("newStep", item.id); }} aria-label={`Add a step under ${item.text}`} title="Add sub step"><ListTree size={12} /></button>
+        <button className="row-action" onClick={() => removeItem(note, item.id)} aria-label={`Remove ${item.text}`}><X size={13} /></button>
+      </div>
+
+      {/* past a few levels the indent stops growing, otherwise the text ends up a letter
+          wide in a narrow column and the row runs on forever */}
+      {!itemShut && (item.items.length > 0 || composing) && <div className={`sub-steps ${depth >= 3 ? "tight" : ""}`} data-step-owner={item.id}>
+        {renderSteps(note, item.id, item.items, depth + 1)}
+      </div>}
+    </div>;
+  }
 
   return <main className="app-shell">
     <aside className="sidebar">
@@ -671,7 +832,8 @@ function App() {
           const columnShut = isCollapsed(category.id);
           return <Fragment key={category.id}>
             {drag?.kind === "column" && drag.index === columnIndex && <div className="drop-slot column" style={{ width: drag.width }} />}
-            <section className={`column ${columnShut ? "collapsed" : ""}`} data-column-id={category.id}>
+            <section className={`column ${columnShut ? "collapsed" : ""}`} data-column-id={category.id}
+              style={{ "--column-width": `${widthOf(category)}px` } as React.CSSProperties}>
             {columnShut && <button className="column-strip" onPointerDown={(event) => beginColumnDrag(event, category)}
               onClick={() => toggleCollapse(category.id)} aria-label={`Expand ${category.name}`}>
               <ChevronRight size={14} />
@@ -718,8 +880,8 @@ function App() {
                   {noteShut ? <div className="note-collapsed">
                       <span className={`note-type ${note.type}`}>{typeLabels[note.type]}</span>
                       {note.checklists.length > 0 && <span>
-                        {note.checklists.flatMap((list) => list.items).filter((item) => item.completed).length} of {note.checklists.flatMap((list) => list.items).length} steps
-                        {" in "}{note.checklists.length} {note.checklists.length === 1 ? "checklist" : "checklists"}
+                        {noteItems(note.checklists).filter((item) => item.completed).length} of {noteItems(note.checklists).length} steps
+                        {" in "}{plural(note.checklists.length, "checklist")}
                       </span>}
                     </div> : <>
 
@@ -732,60 +894,10 @@ function App() {
                       </div>
                     : note.content && <button className="note-body" onClick={() => startEdit("body", note.id)}>{note.content}</button>}
 
-                  {lists.map((list, listIndex) => {
-                    const steps = list.items.filter((item) => !(drag?.kind === "item" && item.id === drag.id));
-                    const done = list.items.filter((item) => item.completed).length;
-                    const stepSlotAt = (index: number) => drag?.kind === "item" && drag.container === list.id && drag.index === index;
-
-                    const listShut = isCollapsed(list.id);
-                    return <Fragment key={list.id}>
-                      {listSlotAt(listIndex) && <div className="drop-slot list" style={{ height: drag?.height }} />}
-                      <div className={`checklist-group ${listShut ? "collapsed" : ""}`} data-checklist-id={list.id}>
-                      <div className="checklist-head">
-                        {isEditing("list", list.id)
-                          ? <InlineInput value={list.name} placeholder="Checklist name"
-                              onCommit={(text) => renameChecklist(note, list, text)} onCancel={cancelEdit} />
-                          : <><button className="row-action" onClick={() => toggleCollapse(list.id)} aria-label={`${listShut ? "Expand" : "Collapse"} ${list.name}`}>
-                                {listShut ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>
-                              <button className="checklist-name" onClick={() => startEdit("list", list.id)}>{list.name}</button>
-                              <span className="checklist-count">{done} of {list.items.length}</span>
-                              <button className="row-action drag-handle" onPointerDown={(event) => beginListDrag(event, note, list)} aria-label={`Move ${list.name}`}><GripVertical size={13} /></button>
-                              <button className="row-action" onClick={() => setConfirming(list.id)} aria-label={`Delete ${list.name}`}><X size={13} /></button></>}
-                      </div>
-
-                      {confirming === list.id && <div className="confirm-bar tight">
-                        <span>Delete this checklist?</span>
-                        <button className="danger-button" onClick={() => deleteChecklist(note, list.id)}>Delete</button>
-                        <button className="ghost-button small" onClick={() => setConfirming("")}>Cancel</button>
-                      </div>}
-
-                      {list.items.length > 0 && <div className="progress">
-                        <span style={{ width: `${Math.round((done / list.items.length) * 100)}%` }} />
-                      </div>}
-
-                      {!listShut && <>
-                      {steps.map((item, index) => <Fragment key={item.id}>
-                        {stepSlotAt(index) && <div className="drop-slot step" style={{ height: drag?.height }} />}
-                        <div className={`check-item ${item.completed ? "done" : ""}`} data-item-id={item.id}>
-                          <button className="row-action drag-handle" onPointerDown={(event) => beginItemDrag(event, note, item.id, item.text)} aria-label={`Move ${item.text}`}><GripVertical size={12} /></button>
-                          <button className="check-toggle" onClick={() => toggleItem(note, list.id, item.id)}>
-                            {item.completed ? <SquareCheckBig size={15} /> : <Square size={15} />}<span>{item.text}</span>
-                          </button>
-                          <button className="row-action" onClick={() => removeItem(note, list.id, item.id)} aria-label={`Remove ${item.text}`}><X size={13} /></button>
-                        </div>
-                      </Fragment>)}
-                      {stepSlotAt(steps.length) && <div className="drop-slot step" style={{ height: drag?.height }} />}
-
-                      {isEditing("newStep", list.id)
-                        ? <div className="step-composer">
-                            <Square size={15} />
-                            <InlineInput placeholder="Step, then enter" onCommit={(text) => addItem(note, list, text)} onCancel={cancelEdit} />
-                          </div>
-                        : <button className="add-item indented" onClick={() => startEdit("newStep", list.id)}><Plus size={13} />Add step</button>}
-                      </>}
-                      </div>
-                    </Fragment>;
-                  })}
+                  {lists.map((list, listIndex) => <Fragment key={list.id}>
+                    {listSlotAt(listIndex) && <div className="drop-slot list" style={{ height: drag?.height }} />}
+                    {renderChecklist(note, list)}
+                  </Fragment>)}
 
                   {listSlotAt(lists.length) && <div className="drop-slot list" style={{ height: drag?.height }} />}
 
@@ -813,6 +925,11 @@ function App() {
               <button className="add-note" onClick={() => addNote(category, "idea")}><Plus size={15} />Add task</button>
               <button className="icon-button" onClick={() => addNote(category, "checklist")} aria-label="Add checklist" title="Add checklist"><ListChecks size={15} /></button>
             </div>}
+
+            {!columnShut && <div className={`column-grip ${sizing?.id === category.id ? "sizing" : ""}`}
+              onPointerDown={(event) => beginResize(event, category)}
+              onDoubleClick={() => resetWidth(category)}
+              title="Drag to resize, double click to reset" />}
             </section>
           </Fragment>;
         })}
