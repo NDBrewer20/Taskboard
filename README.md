@@ -248,42 +248,53 @@ that matters to you.
 Renaming a board, and JSON export/import. Worth having before trusting this with anything you could
 not rebuild.
 
-## Claude Code
+## Agents
 
-The board can be driven by Claude Code: it reads what is there, adds boards, columns and
+The board can be driven by an AI agent: it reads what is there, adds boards, columns and
 tasks, adds checklist steps under other steps, ticks things off and archives them.
 
-Open **Connect Claude** in the sidebar and it walks you through it, checking each step as it
+The connector is a plain MCP server over stdio, so anything that speaks MCP can drive the
+board - Claude Code, Cursor, Zed, VS Code, your own script. Claude Code is the worked example
+below because it can wire itself up.
+
+Open **Connect Agents** in the sidebar and it walks you through it, checking each step as it
 happens rather than just telling you what to type.
 
 The board hands you the connector, one file with no dependencies. Save it anywhere, then tell
-Claude Code where it went:
+your agent where it went:
 
 ```
 Add the taskboard-connector.mjs I just saved in my Downloads as an mcp server called taskboard
 ```
 
-Or do it yourself, with the file's real path:
+Or add it by hand. Most MCP clients take the same block, in their own config or in a project
+`.mcp.json`:
+
+```json
+{ "mcpServers": { "taskboard": { "command": "node", "args": ["C:/Users/you/Downloads/taskboard-connector.mjs"] } } }
+```
+
+Claude Code has a one liner for it:
 
 ```bash
 claude mcp add taskboard -- node "C:/Users/you/Downloads/taskboard-connector.mjs"
 ```
 
-A shortcut like `~` or `%USERPROFILE%` will not do. Claude Code runs node straight rather than
-through a shell, so it would be handed over as literal text.
+A shortcut like `~` or `%USERPROFILE%` will not do. node is run straight rather than through a
+shell, so it would be handed over as literal text.
 
-Then start a new Claude Code session so it picks the tools up, and switch on Claude access in
-the walkthrough.
+Then start a new agent session so it picks the tools up, and switch on **Agent access** in the
+walkthrough.
 
 ### How it hangs together
 
-Everything still lives in the browser. A small connector holds the work Claude has queued,
+Everything still lives in the browser. A small connector holds the work the agent has queued,
 the open tab pulls it every couple of seconds and applies it through the same builders the
-UI uses, then posts the board back so Claude can read it. Nothing is written to disk.
+UI uses, then posts the board back so the agent can read it. Nothing is written to disk.
 
 The connector runs **inside the MCP server's own process**, which is why nobody has to start
-it. Whichever Claude session gets the port hosts it and the rest share it. It binds to
-loopback on `127.0.0.1:4319` and there is no remote mode, so Claude Code and the browser have
+it. Whichever agent session gets the port hosts it and the rest share it. It binds to
+loopback on `127.0.0.1:4319` and there is no remote mode, so the agent and the browser have
 to be on the same computer.
 
 The tab has to be open for changes to land. If it is not, the tools say so rather than

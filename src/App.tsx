@@ -6,7 +6,7 @@ import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
   mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
-  setNoteArchived, updateNote } from "./db";
+  setNoteArchived, sweepNote, updateNote } from "./db";
 import { boardTemplates } from "./templates";
 import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
 
@@ -19,6 +19,11 @@ const listText = (lists: Checklist[]) => lists
 
 // what is currently swapped out for a text box
 type Editing = { kind: "column" | "note" | "body" | "list" | "item" | "newColumn" | "newStep" | "newList"; id: string };
+
+// the board, the archive and the walkthrough are three pages that take turns in the pane.
+// one value rather than a flag each, so two of them can never end up drawn on top of
+// each other the way they did when leaving one did not turn the other off
+type View = "board" | "archive" | "connect";
 
 // notes move between columns, steps and whole checklists within a note, columns across the board
 type DragKind = "note" | "item" | "column" | "list";
@@ -61,7 +66,7 @@ type Settings = {
   collapsedSteps: boolean;
   rollUpSteps: boolean;
   compactRows: boolean;
-  claudeAccess: boolean;
+  agentAccess: boolean;
 };
 
 const defaultSettings: Settings = {
@@ -69,17 +74,22 @@ const defaultSettings: Settings = {
   collapsedSteps: true,
   rollUpSteps: true,
   compactRows: false,
-  // off until you walk through Connect Claude, nothing reaches out on its own
-  claudeAccess: false,
+  // off until you walk through Connect Agents, nothing reaches out on its own
+  agentAccess: false,
 };
 
 const SETTINGS_KEY = "taskboard:settings";
 
-// anything missing falls back to its default, so adding a setting needs no migration
+// anything missing falls back to its default, so adding a setting needs no migration.
+// renaming one does though - agentAccess used to be claudeAccess, and reading the old name
+// carries the switch over rather than quietly turning it off
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return { ...defaultSettings, ...(raw ? JSON.parse(raw) as Partial<Settings> : {}) };
+    const saved = (raw ? JSON.parse(raw) : {}) as Partial<Settings> & { claudeAccess?: boolean };
+    if (saved.agentAccess === undefined && saved.claudeAccess !== undefined) saved.agentAccess = saved.claudeAccess;
+    delete saved.claudeAccess;
+    return { ...defaultSettings, ...saved };
   } catch { return { ...defaultSettings }; }
 }
 
@@ -116,9 +126,8 @@ function App() {
   const [editing, setEditing] = useState<Editing | null>(null);
   const [confirming, setConfirming] = useState("");
   const [collapsed, setCollapsed] = useState(loadCollapsed);
-  const [showArchive, setShowArchive] = useState(false);
+  const [view, setView] = useState<View>("board");
   const [showSettings, setShowSettings] = useState(false);
-  const [showConnect, setShowConnect] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
   const [bridge, setBridge] = useState<BridgeHealth | null>(null);
   const [bridgeLog, setBridgeLog] = useState<OpResult[]>([]);
@@ -149,10 +158,10 @@ function App() {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  // with Claude access on, the board asks the bridge for work every couple of seconds and
+  // with agent access on, the board asks the bridge for work every couple of seconds and
   // applies whatever is waiting. nothing leaves the browser except the board it sends back
   useEffect(() => {
-    if (!settings.claudeAccess) { setBridge(null); return; }
+    if (!settings.agentAccess) { setBridge(null); return; }
 
     let stopped = false;
     let busy = false;
@@ -176,7 +185,7 @@ function App() {
     tick();
     const timer = window.setInterval(tick, 2000);
     return () => { stopped = true; window.clearInterval(timer); };
-  }, [settings.claudeAccess]);
+  }, [settings.agentAccess]);
 
   // the topbar shows a ctrl+k hint, so make the key actually jump to search
   useEffect(() => {
@@ -558,11 +567,14 @@ function App() {
     await updateNote(note.id, { content: content.trim(), updatedAt: new Date().toISOString() }); refresh();
   }
 
-  // the note flag stands on its own, ticking sub steps is what tracks progress
+  // the note flag carries its checklists with it, both ways, the same as ticking a step
+  // carries its sub steps. a done task with unticked steps left behind reads as unfinished
   async function toggleNote(note: Note) {
     const now = new Date().toISOString();
+    const completed = !note.completed;
     await updateNote(note.id, {
-      completed: !note.completed, completedAt: note.completed ? undefined : now, updatedAt: now,
+      completed, completedAt: completed ? now : undefined, updatedAt: now,
+      checklists: sweepNote(note.checklists, completed),
     });
     refresh();
   }
@@ -592,16 +604,12 @@ function App() {
     setPicked(allPicked ? new Set() : new Set(archivedIds()));
   }
 
-  function leaveArchive() {
-    setShowArchive(false); setPicked(new Set()); setConfirming("");
+  // changing page drops the archive selection, since it only means anything in there
+  function openView(next: View) {
+    setView(next); setPicked(new Set()); setConfirming("");
   }
 
-  // the board, the archive and the walkthrough take turns in the same pane
-  const showBoard = !showArchive && !showConnect;
-
-  function openConnect() {
-    setShowArchive(false); setPicked(new Set()); setConfirming(""); setShowConnect(true);
-  }
+  const showBoard = view === "board";
 
   // boards go first, so a cascade cleans up anything else that was picked underneath.
   // deleting a row that a cascade already removed is a no op, which keeps this simple.
@@ -841,17 +849,17 @@ function App() {
       <div className="brand"><div className="brand-mark"><Layers3 size={18} /></div><span>Taskboard</span></div>
       <div className="sidebar-label">Your boards <button className="icon-button" onClick={openBoardDialog} aria-label="Add board"><Plus size={16} /></button></div>
       <nav className="board-list">
-        {liveBoards.map((board) => <button key={board.id} className={`board-button ${!showArchive && activeBoard?.id === board.id ? "active" : ""}`} onClick={() => { leaveArchive(); setShowConnect(false); setActiveBoardId(board.id); }}>
+        {liveBoards.map((board) => <button key={board.id} className={`board-button ${showBoard && activeBoard?.id === board.id ? "active" : ""}`} onClick={() => { openView("board"); setActiveBoardId(board.id); }}>
           {board.name}<span className="note-count">{openCountFor(board.id)}</span>
         </button>)}
       </nav>
       <div className="sidebar-bottom">
-        <button className={`utility-button ${showArchive ? "active" : ""}`} onClick={() => { if (showArchive) leaveArchive(); else setShowArchive(true); }}>
+        <button className={`utility-button ${view === "archive" ? "active" : ""}`} onClick={() => openView(view === "archive" ? "board" : "archive")}>
           <Archive size={17} />Archive{archivedCount > 0 && <span className="note-count">{archivedCount}</span>}
         </button>
-        <button className={`utility-button ${showConnect ? "active" : ""}`} onClick={openConnect}>
-          <PlugZap size={17} />Connect Claude
-          {settings.claudeAccess && <span className={`note-count ${bridge?.listening ? "live" : ""}`}>{bridge?.listening ? "on" : "…"}</span>}
+        <button className={`utility-button ${view === "connect" ? "active" : ""}`} onClick={() => openView(view === "connect" ? "board" : "connect")}>
+          <PlugZap size={17} />Connect Agents
+          {settings.agentAccess && <span className={`note-count ${bridge?.listening ? "live" : ""}`}>{bridge?.listening ? "on" : "…"}</span>}
         </button>
         <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
         <div className="local-status"><span />Stored on this device</div>
@@ -860,7 +868,7 @@ function App() {
 
     <section className="content">
       <header className="topbar">
-        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{showArchive ? "Archive" : showConnect ? "Connect Claude" : activeBoard?.name ?? "No boards"}</strong></div>
+        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : activeBoard?.name ?? "No boards"}</strong></div>
         <div className="top-actions">
           <div className="search-box">
             <Search size={17} />
@@ -874,15 +882,13 @@ function App() {
       <div className="board-heading">
         <div>
           <div className="eyebrow"><Sparkles size={14} />Personal workspace</div>
-          <h1>{showArchive ? "Archive" : showConnect ? "Connect Claude" : activeBoard?.name ?? "No boards yet"}</h1>
-          <p>{showArchive ? "Put things back, or clear them out for good."
-            : showConnect ? "Let Claude Code add tasks and tick them off for you."
+          <h1>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : activeBoard?.name ?? "No boards yet"}</h1>
+          <p>{view === "archive" ? "Put things back, or clear them out for good."
+            : view === "connect" ? "Let an AI agent add tasks and tick them off for you."
             : "Keep the signal visible. Let the rest wait."}</p>
         </div>
-        {showArchive
-          ? <button className="ghost-button" onClick={leaveArchive}><ArrowLeft size={16} />Back to the board</button>
-          : showConnect
-          ? <button className="ghost-button" onClick={() => setShowConnect(false)}><ArrowLeft size={16} />Back to the board</button>
+        {!showBoard
+          ? <button className="ghost-button" onClick={() => openView("board")}><ArrowLeft size={16} />Back to the board</button>
           : activeBoard
             ? <div className="heading-actions">
                 <button className="icon-button" onClick={() => archiveBoard(activeBoard)} aria-label={`Archive ${activeBoard.name}`} title="Archive this board"><Archive size={17} /></button>
@@ -909,13 +915,13 @@ function App() {
         <button className="primary-button" onClick={openBoardDialog}><Plus size={17} />New board</button>
       </div>}
 
-      {showConnect && <Connect
-        bridge={bridge} log={bridgeLog} access={settings.claudeAccess}
-        onAccess={() => toggleSetting("claudeAccess")}
+      {view === "connect" && <Connect
+        bridge={bridge} log={bridgeLog} access={settings.agentAccess}
+        onAccess={() => toggleSetting("agentAccess")}
         board={activeBoard?.name} column={columns[0]?.name}
-        onBack={() => setShowConnect(false)} />}
+        onBack={() => openView("board")} />}
 
-      {showArchive && <div className="archive-view">
+      {view === "archive" && <div className="archive-view">
         {!archivedCount && <div className="empty-board">
           <div className="empty-mark"><Archive size={22} /></div>
           <strong>The archive is empty</strong>
@@ -1128,7 +1134,7 @@ function App() {
         <div className="setting-group">
           {settingRow("compactRows", "Tighter spacing", "Less padding on the rows, so more of the column fits on screen.")}
           <div className="setting-actions">
-            <button type="button" className="ghost-button small" onClick={() => { setShowSettings(false); openConnect(); }}><PlugZap size={14} />Connect Claude Code</button>
+            <button type="button" className="ghost-button small" onClick={() => { setShowSettings(false); openView("connect"); }}><PlugZap size={14} />Connect Agents</button>
             <button type="button" className="ghost-button small" onClick={expandEverything}><ChevronDown size={14} />Unfold everything</button>
             <button type="button" className="ghost-button small" onClick={resetColumnWidths}><Columns3 size={14} />Reset column widths</button>
           </div>

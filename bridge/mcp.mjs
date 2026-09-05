@@ -1,8 +1,8 @@
-// The whole Claude Code side of Taskboard, in one file on purpose.
+// The whole agent side of Taskboard, in one file on purpose.
 //
 // It is an MCP server over stdio, so the board turns up as real tools rather than something
-// Claude has to shell out to, and it hosts the connector the board talks to in this same
-// process, so there is nothing for anyone to start by hand.
+// the agent has to shell out to, and it hosts the connector the board talks to in this same
+// process, so there is nothing for anyone to start by hand. Any MCP client can run it.
 //
 // One file because it gets handed around: the board offers you a copy of this to save
 // wherever you like, and it has to run on its own with no folder around it and nothing
@@ -11,6 +11,10 @@
 // It only ever talks to loopback. There is no remote mode and nothing to configure.
 //
 //   claude mcp add taskboard -- node <path to this file>
+//
+// or the same thing as a config block, which is what most other MCP clients take:
+//
+//   { "mcpServers": { "taskboard": { "command": "node", "args": ["<path to this file>"] } } }
 //
 // Nothing goes on stdout except protocol messages, anything to say goes to stderr.
 
@@ -29,7 +33,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 /* ---------------------------------------------------------------- the connector
 
    Taskboard keeps everything in the browser's IndexedDB and a terminal cannot reach that,
-   so this holds the work Claude has queued, the open tab pulls it, applies it through the
+   so this holds the work the agent has queued, the open tab pulls it, applies it through the
    same code paths the UI uses, and posts back what happened. Nothing touches disk.
 
    If the port is already taken then another session is hosting, and this steps aside and
@@ -100,7 +104,7 @@ export function startHub(port = PORT, host = "127.0.0.1") {
         return send(response, 200, {
           ok: true, service: "taskboard-bridge", port,
           root: process.cwd(), listening: listening(), queued: queue.length,
-          // set by whoever started the hub, so the walkthrough can say Claude is here
+          // set by whoever started the hub, so the walkthrough can say an agent is here
           mcp: now() - lastHello < 600_000,
           board: snapshot?.board ?? null, seenAt: snapshotAt || null,
         });
@@ -109,19 +113,19 @@ export function startHub(port = PORT, host = "127.0.0.1") {
       // the MCP server says hello on the way up, and whenever a tool is used
       if (route === "POST /hello") { lastHello = now(); return send(response, 200, { ok: true }); }
 
-      // Claude reads the board here, by name, so it never has to know an id
+      // the agent reads the board here, by name, so it never has to know an id
       if (route === "GET /state") {
         if (!snapshot) return send(response, 200, { ok: false, listening: listening(), message: "No board has connected yet." });
         return send(response, 200, { ok: true, listening: listening(), at: snapshotAt, ...snapshot });
       }
 
-      // Claude queues work here
+      // the agent queues work here
       if (route === "POST /ops") {
         const body = await readBody(request);
         if (!body.type) return send(response, 400, { ok: false, message: "An op needs a type." });
         if (!listening()) return send(response, 200, {
           ok: false, pending: false,
-          message: "No board is listening. Open Taskboard and switch on Claude access under Connect Claude.",
+          message: "No board is listening. Open Taskboard and switch on Agent access under Connect Agents.",
         });
 
         const op = { id: `op_${now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, at: now(), ...body };
@@ -180,7 +184,7 @@ export async function health() {
   try { return await (await fetch(`${BASE}/health`)).json(); } catch (error) { return offline(error); }
 }
 
-// lets the board's walkthrough show that Claude is here, nothing depends on it
+// lets the board's walkthrough show that an agent is here, nothing depends on it
 export async function announce() {
   try { await fetch(`${BASE}/hello`, { method: "POST" }); } catch { /* not up yet, fine */ }
 }
@@ -283,7 +287,7 @@ export const tools = [
 async function call(name, args) {
   if (name === "taskboard_board") {
     const board = await state();
-    if (!board.ok) return failed(board.message ?? "No board has connected yet. Open Taskboard and switch on Claude access.");
+    if (!board.ok) return failed(board.message ?? "No board has connected yet. Open Taskboard and switch on Agent access.");
     return text(JSON.stringify(board, null, 2));
   }
 
@@ -356,7 +360,7 @@ export async function serve() {
     handle(message).catch((error) => complain(message.id ?? null, -32603, error.message));
   });
 
-  // up front, so the board can connect the moment a Claude session starts
+  // up front, so the board can connect the moment an agent session starts
   await ensureHub();
   announce();
 

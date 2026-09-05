@@ -91,23 +91,22 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
   onBack: () => void;
 }) {
   const up = Boolean(bridge?.ok);
-  // the mcp server says hello when claude starts it, so this is real rather than assumed
-  const claudeSeen = Boolean(bridge?.mcp);
+  // the mcp server says hello when an agent starts it, so this is real rather than assumed
+  const agentSeen = Boolean(bridge?.mcp);
   const connected = Boolean(bridge?.listening) && access;
 
-  // the real path, not a shortcut. Claude Code runs node directly rather than through a
-  // shell, so %USERPROFILE% or ~ would be handed over as literal text and node would give up
+  // the real path, not a shortcut. the connector is run as node directly rather than through
+  // a shell, so %USERPROFILE% or ~ would be handed over as literal text and node would give up
   const windows = navigator.userAgent.includes("Win");
   const saved = windows ? `C:/Users/you/Downloads/${FILE}` : `/home/you/Downloads/${FILE}`;
   const addCommand = `claude mcp add taskboard -- node "${saved}"`;
   const mcpJson = `{ "mcpServers": { "taskboard": { "command": "node", "args": ["${saved}"] } } }`;
 
-
   return <div className="connect-view">
     <div className="connect-intro">
       <div className="connect-mark"><PlugZap size={20} /></div>
       <div>
-        <strong>Let Claude Code keep this board up to date</strong>
+        <strong>Let an agent keep this board up to date</strong>
         <p>
           Two steps, nothing to install by hand. When it is done you can say <em>"add a task
           to {column ?? "the column"}"</em> or <em>"tick off the login task"</em> and it happens here. The board never
@@ -117,39 +116,44 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
       <button className="ghost-button" onClick={onBack}><ArrowLeft size={16} />Back to the board</button>
     </div>
 
-    <Step index={1} done={claudeSeen} title="Give Claude the tools">
+    <Step index={1} done={agentSeen} title="Give your agent the tools">
       <p>
-        The connector is one file with nothing around it and nothing to install. Save it, then tell Claude Code
-        where it went.
+        The connector is one file with nothing around it and nothing to install. It is a plain MCP server, so
+        anything that speaks MCP can drive the board. Save it, then point your agent at it.
       </p>
       <button className="primary-button save-connector" onClick={saveConnector}><Download size={15} />Save the connector</button>
 
-      <p className="faint-note">Then say this to Claude Code. It knows where your Downloads are, so it can do the rest:</p>
+      <p className="faint-note">
+        If your agent can run commands, this is the whole job. It knows where your Downloads are, so it can work
+        out the path and wire it up itself:
+      </p>
       <Command text={`Add the ${FILE} I just saved in my Downloads as an mcp server called taskboard`} />
 
       <p className="faint-note">
-        <Terminal size={12} /> Or do it yourself, with the file's real path. Drag the file into the terminal to
-        paste it. A shortcut like <code>~</code> or <code>%USERPROFILE%</code> will not do, Claude Code runs node
-        straight rather than through a shell, so it would be handed over as literal text.
-      </p>
-      <Command text={addCommand} />
-      <p className="faint-note">
-        No terminal? Put the same thing in <code>.mcp.json</code> where you work, then approve it when Claude asks.
+        Otherwise add it by hand, with the file's real path. Most MCP clients take the same block, in their own
+        config or in a project <code>.mcp.json</code>:
       </p>
       <Command text={mcpJson} />
 
-      {claudeSeen
-        ? <Chip state="on">Claude is connected</Chip>
+      <p className="faint-note">
+        <Terminal size={12} /> Claude Code has a one liner for it. Drag the file into the terminal to paste its
+        path. A shortcut like <code>~</code> or <code>%USERPROFILE%</code> will not do, node is run straight rather
+        than through a shell, so it would be handed over as literal text.
+      </p>
+      <Command text={addCommand} />
+
+      {agentSeen
+        ? <Chip state="on">An agent is connected</Chip>
         : up
-          ? <Chip state="waiting">Connector found, but Claude has not used it yet</Chip>
-          : <Chip state="waiting">Waiting for a Claude Code session</Chip>}
-      {!claudeSeen && <p className="faint-note">
+          ? <Chip state="waiting">Connector found, but no agent has used it yet</Chip>
+          : <Chip state="waiting">Waiting for an agent</Chip>}
+      {!agentSeen && <p className="faint-note">
         Tools are picked up when a session starts, so start a new one afterwards. There is no need to restart your
-        editor. If it is a project <code>.mcp.json</code>, Claude asks you to approve it first.
+        editor. If it is a project <code>.mcp.json</code>, most agents ask you to approve it first.
       </p>}
-      {up && !claudeSeen && <p className="faint-note">
-        Claude Code has to be running on this computer, since the connector lives inside it and the board reaches
-        it on loopback.
+      {up && !agentSeen && <p className="faint-note">
+        The agent has to be running on this computer, since the connector lives inside it and the board reaches it
+        on loopback.
       </p>}
     </Step>
 
@@ -157,26 +161,26 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
       <p>The board checks for work every couple of seconds while this is on. Turn it off any time.</p>
       <button className={`setting-row ${access ? "on" : ""}`} role="switch" aria-checked={access} onClick={onAccess}>
         <span className="setting-what">
-          <strong>Claude access</strong>
+          <strong>Agent access</strong>
           <small>{board ? `Changes land on "${board}", the board you have open.` : "Open a board first."}</small>
         </span>
         <span className="switch"><span /></span>
       </button>
       {connected
         ? <Chip state="on">Connected</Chip>
-        : access ? <Chip state="waiting">Waiting for Claude Code</Chip> : <Chip state="off">Switched off</Chip>}
+        : access ? <Chip state="waiting">Waiting for an agent</Chip> : <Chip state="off">Switched off</Chip>}
     </Step>
 
     <Step index={3} done={log.length > 0} title="Try it">
-      <p>Ask Claude Code for something and watch it turn up here.</p>
-      <Command text={`Add a task called "Try me" to ${column ?? "my first column"}`} note="Say this to Claude, do not run it in a terminal." />
+      <p>Ask your agent for something and watch it turn up here.</p>
+      <Command text={`Add a task called "Try me" to ${column ?? "my first column"}`} note="Say this to the agent, do not run it in a terminal." />
 
       <div className="activity">
         {log.length
           ? log.slice(0, 6).map((entry) => <div key={entry.id} className={`activity-row ${entry.ok ? "" : "bad"}`}>
               {entry.ok ? <Check size={13} /> : <Bot size={13} />}<span>{entry.message}</span>
             </div>)
-          : <div className="activity-row empty"><Bot size={13} /><span>Nothing yet. Anything Claude does to the board shows up here.</span></div>}
+          : <div className="activity-row empty"><Bot size={13} /><span>Nothing yet. Anything an agent does to the board shows up here.</span></div>}
       </div>
     </Step>
 
@@ -190,7 +194,7 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
 
       <div className="field-label">Where it runs</div>
       <p>
-        The connector runs inside Claude Code itself, on <code>127.0.0.1:4319</code>, and only while a session is
+        The connector runs inside the agent itself, on <code>127.0.0.1:4319</code>, and only while a session is
         open. Nothing is written to disk, nothing leaves this machine, and the board still lives entirely in this
         browser. Both halves have to be on the same computer.
       </p>

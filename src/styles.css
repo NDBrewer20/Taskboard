@@ -29,14 +29,17 @@ h1, h2, p { margin: 0; }
 
 /* sidebar holds the boards, one level above the columns */
 .app-shell { min-height: 100vh; display: flex; }
-.sidebar { width: 254px; flex: 0 0 254px; border-right: 1px solid var(--line); padding: 29px 18px 20px; display: flex; flex-direction: column; background: #16161c; }
+.sidebar { width: 254px; flex: 0 0 254px; border-right: 1px solid var(--line); padding: 29px 18px 20px; display: flex; flex-direction: column; background: #16161c;
+  /* its own frame rather than part of the page. sticky instead of stretching to the shell,
+     so a long board scrolls past it and the nav stays where you left it */
+  position: sticky; top: 0; align-self: flex-start; height: 100vh; }
 .brand { display: flex; align-items: center; gap: 10px; font-family: 'Space Grotesk'; font-weight: 700; font-size: 19px; padding: 0 11px 48px; }
 .brand-mark { width: 30px; height: 30px; color: #14131a; background: var(--ink); display: grid; place-items: center; border-radius: 9px; }
 .sidebar-label { color: var(--faint); text-transform: uppercase; letter-spacing: .11em; font-size: 10px; font-weight: 700; padding: 0 12px 12px; display: flex; justify-content: space-between; align-items: center; }
 .icon-button { color: var(--faint); background: transparent; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; flex: 0 0 auto; }
 .icon-button:hover { background: var(--raised); color: var(--ink); }
 
-.board-list { display: grid; gap: 5px; }
+.board-list { display: grid; gap: 5px; overflow-y: auto; min-height: 0; }
 .board-button, .utility-button { display: flex; align-items: center; gap: 11px; color: var(--muted); text-align: left; background: transparent; border-radius: 8px; padding: 11px 12px; font-size: 14px; }
 .board-button:hover, .utility-button:hover { color: var(--ink); background: var(--raised); }
 .board-button.active { color: var(--ink); background: var(--raised); font-weight: 600; }
@@ -274,9 +277,9 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 
 @media (max-width: 620px) {
   .app-shell { display: block; }
-  .sidebar { width: 100%; height: auto; padding: 18px 16px 13px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidebar { width: 100%; position: static; height: auto; padding: 18px 16px 13px; border-right: 0; border-bottom: 1px solid var(--line); }
   .brand { padding: 0 4px 18px; }
-  .board-list { display: flex; overflow-x: auto; }
+  .board-list { display: flex; overflow-x: auto; overflow-y: visible; }
   .board-button { flex: 0 0 auto; }
   .sidebar-label, .sidebar-bottom { display: none; }
   .content { padding: 0 15px 36px; }
@@ -319,7 +322,7 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .archive-row.picked { border-color: #4a4657; background: #1e1d26; }
 .archive-bar .danger-button { display: flex; align-items: center; gap: 6px; }
 
-/* the Connect Claude walkthrough */
+/* the Connect Agents walkthrough */
 .connect-view { padding: 26px 0 40px; display: grid; gap: 14px; max-width: 760px; }
 .connect-intro { display: flex; align-items: start; gap: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 17px 18px; }
 .connect-mark { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: rgba(240, 141, 120, .13); color: var(--coral); }
@@ -360,5 +363,5 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .faint-note { display: flex; align-items: baseline; gap: 7px; color: var(--faint) !important; }
 .note-count.live { background: rgba(122, 205, 179, .18); color: var(--teal); }
 
-/* the two ways of getting the tools to Claude */
+/* getting the tools to the agent */
 .save-connector { justify-self: start; display: flex; align-items: center; gap: 8px; padding: 10px 14px; }

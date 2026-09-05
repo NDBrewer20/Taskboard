@@ -207,6 +207,15 @@ export function rollUp(items: ChecklistItem[]): ChecklistItem[] {
 
 export const rollUpNote = (lists: Checklist[]) => lists.map((list) => ({ ...list, items: rollUp(list.items) }));
 
+// the other direction: ticking the note itself settles every step under it, however deep.
+// a done task with half its steps unticked reads as unfinished to anything parsing the
+// board, so the flag and the steps have to agree
+export function sweepNote(lists: Checklist[], completed: boolean): Checklist[] {
+  const sweep = (items: ChecklistItem[]): ChecklistItem[] =>
+    items.map((item) => ({ ...item, completed, items: sweep(item.items) }));
+  return lists.map((list) => ({ ...list, items: sweep(list.items) }));
+}
+
 // same two, lifted to the note so a step can move between its checklists as well
 export const dropNoteItem = (lists: Checklist[], itemId: string) =>
   lists.map((list) => ({ ...list, items: dropItem(list.items, itemId) }));

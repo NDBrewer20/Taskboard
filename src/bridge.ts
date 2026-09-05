@@ -1,14 +1,14 @@
-// The board's half of the Claude Code integration.
+// The board's half of the agent integration.
 //
-// The bridge holds ops Claude has queued. This pulls them, applies them through the same
+// The bridge holds ops the agent has queued. This pulls them, applies them through the same
 // builders the UI uses so positions and types stay right, and posts back the board plus a
 // line about what each op did. Everything still lives in the browser, nothing is exported.
 
-import { allItems, buildBoard, buildChecklist, buildColumn, buildItem, buildNote, database, rollUpNote,
-  setNoteArchived, updateNote } from "./db";
+import { allItems, buildBoard, buildChecklist, buildColumn, buildItem, buildNote, database, noteItems, rollUpNote,
+  setNoteArchived, sweepNote, updateNote } from "./db";
 import type { Board, Category, Checklist, ChecklistItem, Note } from "./types";
 
-// the connector runs inside Claude Code on this machine, so there is only ever one place
+// the connector runs inside the agent on this machine, so there is only ever one place
 // to look. loopback, never anywhere else
 export const BRIDGE = "http://127.0.0.1:4319";
 
@@ -33,7 +33,7 @@ export type OpResult = { id: string; ok: boolean; message: string };
 
 export type BridgeHealth = { ok: boolean; port?: number; root?: string; listening?: boolean; mcp?: boolean; message?: string };
 
-// what the board looks like to Claude. names, not ids, are how it addresses things
+// what the board looks like to the agent. names, not ids, are how it addresses things
 type StepView = { id: string; text: string; done: boolean; steps: StepView[] };
 type TaskView = { id: string; title: string; type: string; done: boolean; description: string; checklists: { name: string; steps: StepView[] }[] };
 type BoardView = { board: string; boardId: string; columns: { name: string; tasks: TaskView[] }[]; boards: string[] };
@@ -59,7 +59,7 @@ export function snapshot(board: Board, boards: Board[], columns: Category[], not
   };
 }
 
-/* Claude says "the login task", not a uuid, so everything is matched by name. an exact
+/* an agent says "the login task", not a uuid, so everything is matched by name. an exact
    match wins, otherwise a single partial one does, and anything ambiguous is an error
    rather than a guess at which one was meant. */
 
@@ -82,7 +82,7 @@ const findStep = (note: Note, needle: string) =>
 
 const stamp = () => new Date().toISOString();
 
-// a tick from Claude should land the same way a click does, so it follows the same setting
+// a tick from an agent should land the same way a click does, so it follows the same setting
 function rollUpWanted() {
   try {
     const raw = localStorage.getItem("taskboard:settings");
@@ -212,8 +212,15 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
       return said(true, `${done ? "Ticked" : "Unticked"} "${found.row!.text}" on "${note.title}".`);
     }
 
-    await updateNote(note.id, { completed: done, completedAt: done ? stamp() : undefined, updatedAt: stamp() });
-    return said(true, `${done ? "Ticked off" : "Reopened"} "${note.title}".`);
+    // the steps come with it, so what the agent reads back next time cannot contradict itself
+    const steps = noteItems(note.checklists).length;
+    await updateNote(note.id, {
+      completed: done, completedAt: done ? stamp() : undefined, updatedAt: stamp(),
+      checklists: sweepNote(note.checklists, done),
+    });
+
+    const tail = steps ? ` and ${done ? "ticked" : "unticked"} its ${steps} step${steps === 1 ? "" : "s"}` : "";
+    return said(true, `${done ? "Ticked off" : "Reopened"} "${note.title}"${tail}.`);
   }
 
   if (op.type === "archiveTask") {
@@ -224,9 +231,9 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
   return said(false, `Nothing here knows how to "${op.type}".`);
 }
 
-/* --- the loop the open tab runs while Claude access is on --- */
+/* --- the loop the open tab runs while agent access is on --- */
 
-// is the connector up. nothing is running when Claude Code is not, which is normal
+// is the connector up. nothing is running when no agent is, which is normal
 export async function findBridge(): Promise<{ base: string; info: BridgeHealth } | null> {
   try {
     const info = await (await fetch(`${BRIDGE}/health`)).json() as BridgeHealth;
@@ -236,7 +243,7 @@ export async function findBridge(): Promise<{ base: string; info: BridgeHealth }
   return null;
 }
 
-// the board Claude sees, read straight out of dexie so it is never a render behind
+// the board the agent sees, read straight out of dexie so it is never a render behind
 export async function currentView(boardId: string): Promise<BoardView | null> {
   const boards = await database.boards.orderBy("position").toArray();
   const live = boards.filter((row) => !row.archivedAt);
