@@ -272,6 +272,11 @@ const failed = (body) => ({ content: [{ type: "text", text: body }], isError: tr
 // a task or a step is named the way you would say it out loud, the board resolves it
 const target = { type: "string", description: "Name of the task, or its id. A partial name is fine as long as it only matches one." };
 
+// and the board it sits on. left out it falls back to the open board, which is really just
+// the first one in the sidebar - so anything working further down the list has to say which,
+// or the task is looked for on the wrong board and either is not found or is the wrong one
+const owner = { type: "string", description: "Which board the task is on. Defaults to the open board, the first one in the sidebar." };
+
 export const tools = [
   {
     name: "taskboard_board",
@@ -313,6 +318,7 @@ export const tools = [
       text: { type: "string" },
       under: { type: "string", description: "Name of a step this one indents under. Leave out for a top level step." },
       checklist: { type: "string", description: "Which checklist on the task. Defaults to the first one." },
+      board: owner,
     }, required: ["task", "text"] },
   },
   {
@@ -322,12 +328,13 @@ export const tools = [
       task: target,
       step: { type: "string", description: "Name of a step on that task. Leave out to tick the task itself." },
       done: { type: "boolean", description: "Defaults to true." },
+      board: owner,
     }, required: ["task"] },
   },
   {
     name: "taskboard_archive",
     description: "Archive a task. It leaves the board but nothing is deleted, it can be restored.",
-    inputSchema: { type: "object", properties: { task: target }, required: ["task"] },
+    inputSchema: { type: "object", properties: { task: target, board: owner }, required: ["task"] },
   },
 ];
 
@@ -344,7 +351,7 @@ async function call(name, args) {
     taskboard_add_task: () => ({ type: "createTask", ...args }),
     taskboard_add_step: () => ({ type: "addStep", ...args }),
     taskboard_complete: () => ({ type: "complete", ...args }),
-    taskboard_archive: () => ({ type: "archiveTask", task: args.task }),
+    taskboard_archive: () => ({ type: "archiveTask", task: args.task, board: args.board }),
   }[name];
 
   if (!op) return failed(`No tool called ${name}.`);
