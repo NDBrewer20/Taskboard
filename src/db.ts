@@ -1,5 +1,5 @@
 import Dexie, { type Table } from "dexie";
-import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
+import type { Board, Category, Checklist, ChecklistItem, Deletion, Note, NoteType } from "./types";
 import type { BoardTemplate } from "./templates";
 
 // crypto.randomUUID only exists in a secure context. localhost counts as one, a plain
@@ -22,6 +22,7 @@ type SubListItem = ChecklistItem & { checklists?: Checklist[] };
 class TaskboardDatabase extends Dexie {
   boards!: Table<Board, string>;
   categories!: Table<Category, string>;
+  deletions!: Table<Deletion, string>;
   notes!: Table<Note, string>;
 
   constructor() {
@@ -41,25 +42,28 @@ class TaskboardDatabase extends Dexie {
       const categories = tx.table<Category, string>("categories");
       if (!(await categories.count())) return;
 
-      // old data had no board, so everything that exists lands under one
+      // old data had no board, so everything that exists lands under one. v7 backfills the
+      // updatedAt on it either way, this just saves it a pass
       const boardId = newId();
+      const madeAt = new Date().toISOString();
       await tx.table<Board, string>("boards").add({
-        id: boardId, name: "Taskboard", position: 0, createdAt: new Date().toISOString(),
+        id: boardId, name: "Taskboard", position: 0, createdAt: madeAt, updatedAt: madeAt,
       });
       await categories.toCollection().modify((category) => { category.boardId = boardId; });
       // v2 era rows still carried a flat items array, v4 below is what folds it into a checklist
       await tx.table("notes").toCollection().modify((note) => { (note as { items?: ChecklistItem[] }).items ??= []; });
     });
 
-    // one time wipe, everything before this was demo data for testing the base functions
+    // v3 used to wipe every table here - everything before it was demo data for testing the
+    // base functions. That has long since run, and what it does now is sit waiting for a
+    // database still on v1 or v2 to open the app and lose everything in it. A board served
+    // over a different origin is exactly that, since IndexedDB is per origin and one that
+    // has not been opened in a while never moved past v2. The upgrade is gone, the version
+    // stays so the chain from v2 up still lines up.
     this.version(3).stores({
       boards: "id, position",
       categories: "id, boardId, position",
       notes: "id, categoryId, completed, position, updatedAt",
-    }).upgrade(async (tx) => {
-      await tx.table("notes").clear();
-      await tx.table("categories").clear();
-      await tx.table("boards").clear();
     });
 
     // v4 turns the flat items array into named checklists, a note can hold several
@@ -107,6 +111,22 @@ class TaskboardDatabase extends Dexie {
         for (const list of (note.checklists ?? []) as Checklist[]) foldIn(list.items);
       });
     });
+
+    // v7 is the server storage groundwork. boards and columns get their own updatedAt,
+    // which is what decides whose copy is newer, and deletions holds a row id after the
+    // row itself is gone so the delete can travel instead of the row coming back.
+    this.version(7).stores({
+      boards: "id, position, updatedAt",
+      categories: "id, boardId, position, updatedAt",
+      notes: "id, categoryId, completed, position, updatedAt",
+      deletions: "id, kind, deletedAt",
+    }).upgrade(async (tx) => {
+      // nothing carried one before, so when the row was made is the honest answer. now()
+      // would say every board on the machine was edited the moment you upgraded, and the
+      // first sync would hand all of it to the server as the newer side
+      await tx.table("boards").toCollection().modify((row) => { row.updatedAt ??= row.createdAt; });
+      await tx.table("categories").toCollection().modify((row) => { row.updatedAt ??= row.createdAt; });
+    });
   }
 }
 
@@ -118,6 +138,22 @@ export const database = new TaskboardDatabase();
 const noteWrites = database.notes as unknown as Table<Record<string, unknown>, string>;
 
 export const updateNote = (id: string, changes: Partial<Note>) => noteWrites.update(id, changes);
+
+// boards and columns go through these rather than the table, so a write cannot land
+// without moving updatedAt with it. sync reads that stamp and only that stamp, so a row
+// changed behind its back looks unchanged and the edit never leaves the browser
+export const updateBoard = (id: string, changes: Partial<Board>) =>
+  database.boards.update(id, { ...changes, updatedAt: new Date().toISOString() });
+
+export const updateColumn = (id: string, changes: Partial<Category>) =>
+  database.categories.update(id, { ...changes, updatedAt: new Date().toISOString() });
+
+// a row deleted for good leaves one of these behind. the row is gone either way - this is
+// what tells the other side it went, rather than letting it look like a row never seen
+const remember = (rows: { id: string; kind: Deletion["kind"] }[]) => {
+  const deletedAt = new Date().toISOString();
+  return database.deletions.bulkPut(rows.map((row) => ({ ...row, deletedAt })));
+};
 
 export const columnColors = ["coral", "teal", "gold", "violet", "sky"];
 
@@ -133,14 +169,16 @@ export const clampColumnWidth = (width: number) =>
   Math.round(Math.max(columnWidthRange.min, Math.min(columnWidthRange.max, width)));
 
 export function buildBoard(name: string, position: number): Board {
-  return { id: newId(), name, position, createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  return { id: newId(), name, position, createdAt: now, updatedAt: now };
 }
 
 export function buildColumn(boardId: string, name: string, position: number): Category {
+  const now = new Date().toISOString();
   return {
     id: newId(), boardId, name,
     color: columnColors[position % columnColors.length], position,
-    createdAt: new Date().toISOString(),
+    createdAt: now, updatedAt: now,
   };
 }
 
@@ -294,13 +332,16 @@ export async function moveColumn(categoryId: string, toIndex: number) {
 
     rows.splice(Math.max(0, Math.min(toIndex, rows.length)), 0, category);
     await Promise.all(rows.map((row, index) =>
-      row.position === index ? undefined : database.categories.update(row.id, { position: index })));
+      row.position === index ? undefined : updateColumn(row.id, { position: index })));
   });
 }
 
 // archiving just stamps a date, so nothing is lost and the schema does not change.
 // dexie treats an undefined value as delete the property, which is what restores it.
-const archiveStamp = (archived: boolean) => ({ archivedAt: archived ? new Date().toISOString() : undefined });
+const archiveStamp = (archived: boolean) => ({
+  archivedAt: archived ? new Date().toISOString() : undefined,
+  updatedAt: new Date().toISOString(),
+});
 
 export const setBoardArchived = (id: string, archived: boolean) =>
   database.boards.update(id, archiveStamp(archived));
@@ -311,11 +352,21 @@ export const setColumnArchived = (id: string, archived: boolean) =>
 export const setNoteArchived = (id: string, archived: boolean) =>
   updateNote(id, archiveStamp(archived));
 
-// deleting a board takes its columns and their notes with it
+// deleting a board takes its columns and their notes with it. every id that goes is
+// written down first, in the same transaction, so a delete that lands here cannot come
+// back on the next pull as a row the server still has
 export async function deleteBoardForever(boardId: string) {
-  await database.transaction("rw", database.boards, database.categories, database.notes, async () => {
+  await database.transaction("rw", database.boards, database.categories, database.notes, database.deletions, async () => {
     const columns = await database.categories.where("boardId").equals(boardId).toArray();
-    for (const column of columns) await database.notes.where("categoryId").equals(column.id).delete();
+    const notes = await database.notes.where("categoryId").anyOf(columns.map((column) => column.id)).toArray();
+
+    await remember([
+      { id: boardId, kind: "board" },
+      ...columns.map((column) => ({ id: column.id, kind: "category" as const })),
+      ...notes.map((note) => ({ id: note.id, kind: "note" as const })),
+    ]);
+
+    await database.notes.where("categoryId").anyOf(columns.map((column) => column.id)).delete();
     await database.categories.where("boardId").equals(boardId).delete();
     await database.boards.delete(boardId);
   });
@@ -323,10 +374,22 @@ export async function deleteBoardForever(boardId: string) {
 
 // and a column takes its notes
 export async function deleteColumnForever(categoryId: string) {
-  await database.transaction("rw", database.categories, database.notes, async () => {
+  await database.transaction("rw", database.categories, database.notes, database.deletions, async () => {
+    const notes = await database.notes.where("categoryId").equals(categoryId).toArray();
+
+    await remember([
+      { id: categoryId, kind: "category" },
+      ...notes.map((note) => ({ id: note.id, kind: "note" as const })),
+    ]);
+
     await database.notes.where("categoryId").equals(categoryId).delete();
     await database.categories.delete(categoryId);
   });
 }
 
-export const deleteNoteForever = (noteId: string) => database.notes.delete(noteId);
+export async function deleteNoteForever(noteId: string) {
+  await database.transaction("rw", database.notes, database.deletions, async () => {
+    await remember([{ id: noteId, kind: "note" }]);
+    await database.notes.delete(noteId);
+  });
+}

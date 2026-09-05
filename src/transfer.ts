@@ -13,7 +13,10 @@ export type BoardBundle = { board: Board; columns: { column: Category; notes: No
 // the wrapper a json export carries, so a file can say what it is before we trust it
 export type TransferFile = { app: "taskboard"; version: number; exportedAt: string; boards: BoardBundle[] };
 
-export const FILE_VERSION = 1;
+// 2 added updatedAt on boards and columns. nothing on the way back in checks this, an
+// older file just falls back field by field like it always did - it is here so a file can
+// say which shape it was written in
+export const FILE_VERSION = 2;
 
 // json is the only one that comes back in, the other two are for reading and for
 // spreadsheets. that trade is spelled out on the format cards rather than left to be found
@@ -208,6 +211,12 @@ const noteTypes: NoteType[] = ["checklist", "direction", "descriptor", "idea"];
 const asText = (value: unknown, fallback = "") => (typeof value === "string" ? value : fallback);
 const asDate = (value: unknown) => (typeof value === "string" && value ? value : new Date().toISOString());
 const asStamp = (value: unknown) => (typeof value === "string" && value ? { archivedAt: value } : {});
+
+// a file written before boards and columns had an updatedAt falls back to when the row was
+// made, not to now. now would say every row in an old export was edited the second it was
+// read, and on the first sync all of it would beat whatever the server already held
+const asEdited = (value: unknown, created: unknown) =>
+  (typeof value === "string" && value ? value : asDate(created));
 const objects = (source: unknown) => (Array.isArray(source) ? source : [])
   .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object");
 
@@ -242,7 +251,8 @@ export function readTransfer(text: string): BoardBundle[] {
     return {
       board: {
         id: newId(), name: asText(board.name, "Imported board"), position: 0,
-        createdAt: asDate(board.createdAt), ...asStamp(board.archivedAt),
+        createdAt: asDate(board.createdAt), updatedAt: asEdited(board.updatedAt, board.createdAt),
+        ...asStamp(board.archivedAt),
       },
       columns: objects(row.columns).map((entry) => {
         const column = (entry.column ?? {}) as Record<string, unknown>;
@@ -252,7 +262,8 @@ export function readTransfer(text: string): BoardBundle[] {
             id: newId(), boardId: "", name: asText(column.name, "Column"),
             color: asText(column.color, "coral"), position: 0,
             ...(typeof column.width === "number" ? { width: column.width } : {}),
-            createdAt: asDate(column.createdAt), ...asStamp(column.archivedAt),
+            createdAt: asDate(column.createdAt), updatedAt: asEdited(column.updatedAt, column.createdAt),
+            ...asStamp(column.archivedAt),
           },
           notes: objects(entry.notes).map((note) => ({
             id: newId(), categoryId: "", title: asText(note.title, "Untitled"), content: asText(note.content),

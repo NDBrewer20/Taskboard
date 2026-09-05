@@ -1,11 +1,13 @@
 export type NoteType = "checklist" | "direction" | "descriptor" | "idea";
 
-// top level of the tree, holds the columns
+// top level of the tree, holds the columns. updatedAt is what sync compares to work out
+// which side is newer, so every level carries one now rather than only the note
 export type Board = {
   id: string;
   name: string;
   position: number;
   createdAt: string;
+  updatedAt: string;
   archivedAt?: string;
 };
 
@@ -19,6 +21,7 @@ export type Category = {
   position: number;
   width?: number;
   createdAt: string;
+  updatedAt: string;
   archivedAt?: string;
 };
 
@@ -52,4 +55,13 @@ export type Note = {
   updatedAt: string;
   completedAt?: string;
   archivedAt?: string;
+};
+
+// what is left behind when a row is deleted for good. a delete is otherwise just an
+// absence, and an absence is indistinguishable from a row the other side has not seen
+// yet - so without this the next pull hands the deleted row straight back
+export type Deletion = {
+  id: string;
+  kind: "board" | "category" | "note";
+  deletedAt: string;
 };

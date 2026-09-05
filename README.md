@@ -18,6 +18,9 @@ npm install
 npm run dev
 ```
 
+That starts the board on 5173 and the sync api on 4320 together, since the board proxies `/api`
+across to it. `npm run dev:web` is the board on its own if you do not want the server.
+
 For a production build:
 
 ```bash
@@ -166,11 +169,28 @@ into IndexedDB directly. The schema is versioned:
 
 - **v1** — flat categories and notes
 - **v2** — adds the board level above categories, backfills `items` on every note
-- **v3** — one-time wipe that clears the old demo data
+- **v3** — used to be a one-time wipe of the old demo data. The wipe is gone, the version stays
 - **v4** — folds each note's flat `items` array into a named checklist, so a note can hold several
+- **v5** — gave every step its own `checklists` array, sub steps were a group of their own then
+- **v6** — drops that again, a step owns its sub steps directly
+- **v7** — `updatedAt` on boards and columns, and the `deletions` table
 
-Version 3 exists only to drop the test rows from earlier development. Once you have loaded the app
-once it has already run, and the block can be deleted from `src/db.ts` before anyone else uses this.
+Version 3 cleared every table. That had long since served its purpose, and what it did instead was
+sit waiting for any database still on v1 or v2 to open the app and lose everything in it. A board
+served from a different origin is exactly that — IndexedDB is per origin, so one you have not
+opened in a while never moved past v2. The upgrade is gone and the version number stays, so the
+chain from v2 upward still lines up.
+
+Boards and columns carry an `updatedAt` from v7, the same as notes always did. It is what sync
+compares to work out whose copy is newer, so a write that skips it looks like no write at all —
+which is why `updateBoard` and `updateColumn` in `src/db.ts` exist and the tables are not written
+to directly.
+
+**Deleting for good writes a tombstone.** A row that is deleted is otherwise just an absence, and
+an absence looks exactly like a row the other side has not been told about yet, so without one the
+next pull hands the deleted row straight back. `deletions` holds the id, what kind of row it was,
+and when it went. Archiving needs none of this — it is a stamp on a row that is still there, so it
+travels like any other edit.
 
 ## Import and export
 
@@ -197,6 +217,127 @@ edited or older file falls back field by field rather than failing outright. Eve
 new boards with fresh ids at the bottom of the sidebar — nothing already there is touched — and a
 name that is taken comes in as `(imported)`.
 
+## Server storage
+
+**Sync** in the sidebar is where a key is made, and after that it looks after itself. Boards still
+live in this browser and are still read and written there — the server holds a copy, and every
+device holding a key converges on it without anybody importing or exporting anything.
+
+What makes it go:
+
+| When | What |
+| --- | --- |
+| you stop typing | 2.5s later the tree goes up |
+| every 15 seconds | a pull, to see what the other devices did |
+| coming back to the tab | a pull on focus and on becoming visible, since a background tab has its timers cut to about one a minute and will be behind |
+| coming back online | a full sync, which drains whatever piled up while it was off |
+
+A push is the **whole tree**, not a delta. That is what makes the timing forgiving: a missed nudge
+delays an edit, it never loses one. Local writes are noticed through Dexie's table hooks rather
+than by having every caller remember to say so, because the bridge writes the same tables an agent
+does and a new caller added later would be missed.
+
+Nothing is applied while you are **dragging** something. A drag renumbers a whole column, and a
+pull landing halfway through would be writing rows to positions that are still moving.
+
+There is no login, no email and nothing to reset. A **key** is the whole of it: hold one and you
+get the boards under it. Only the hash is stored, so the server cannot look one up, mail it to you
+or hand it back — not even to you.
+
+### Two ways onto a second device
+
+They are for different devices, which is why there are two:
+
+- **The key itself** — long lived, kept in this browser, revealed and copied when you want another
+  machine or an agent on it. This is the one worth writing down. It is masked until you ask, and
+  read out of `localStorage` rather than fetched, because there is nowhere to fetch it from.
+- **A pairing code** — six digits, five minutes, one use. For the phone, where typing out a
+  47 character key is the reason you would give up. Device one asks for a code, you read it out,
+  device two types it in.
+
+What claiming a code hands over is **not** the first device's key — the server has never seen it —
+but a **new key on the same account**. So every device holds its own, and revoking one does not
+touch the others. Give the MCP connector its own and you can kill the agent's access without
+touching your phone.
+
+Six digits sounds thin. What keeps it safe is that it dies in five minutes, works once, burns out
+after five wrong guesses, and the api caps how fast any one caller can guess at all. The last key
+on an account cannot be revoked, since that would strand every board under it.
+
+An **account** here is an id and nothing else — no name, no email, no password. It exists so that
+several keys can point at one pile of boards.
+
+```bash
+npm run dev                      # the board and the sync api together, which is all it takes
+npm run test:sync                # the round trip, the api, and two devices converging
+```
+
+`npm run dev` runs both halves: vite on 5173 and the api on 4320, with **vite proxying `/api`
+across** so the board sees one origin exactly as it does in the container. There is nothing to
+configure and no live server involved — a key made in dev is made on your own machine, in
+`./data/taskboard.db`, and you can delete it and start again whenever you like.
+
+`npm run dev:web` and `npm run sync` are the two halves on their own if you want them in separate
+terminals.
+
+The routes, all under `/api`. The key goes in an `x-taskboard-key` header, never in the url, where
+it would land in every log along the way:
+
+| Route | Key needed | What |
+| --- | --- | --- |
+| `POST /keys` | no | makes an account and hands back its first key |
+| `POST /pairings/claim` | no | six digits in, a new key on that account back |
+| `POST /pairings` | yes | opens a code, five minutes, one use |
+| `GET /keys` | yes | the devices on this account |
+| `DELETE /keys/:id` | yes | throws one off. Never the last one |
+| `GET /boards` | yes | every board under that account |
+| `PUT /boards` | yes | pushes boards up |
+
+Only the two pairing-free routes can be reached without a key, and the claim route is the one that
+is rate limited by caller as well as by code.
+
+### It is the export format
+
+`GET /api/boards` answers with a Taskboard export file — the same wrapper `src/transfer.ts` writes,
+down to the `app` and `exportedAt` fields. So a curl of that endpoint saved to disk imports back
+into the app through the ordinary **Import & export** panel, and a file you exported months ago
+pushes straight up here with no converter in between.
+
+That is the reason the server schema mirrors the browser's rather than being designed on its own:
+three tables with the same field names, and `checklists` left as json on the note exactly as Dexie
+holds it. A shape of its own would mean two schemas drifting apart and a translation layer in the
+middle keeping them honest. An older file with no `updatedAt` above the note is read field by
+field like an import is, and falls back to when the row was made — not to now, which would make
+every row in an old export the newest thing on the server and have it win every conflict.
+
+### Nothing is removed by accident
+
+**A push only adds and updates.** Send two boards when the server holds five and the other three
+are still there afterwards. There is no route that replaces a key's boards wholesale, because a
+client that is halfway through its first sync, or that only knows about one board, would take out
+everything it had not heard of.
+
+Removal only happens through an explicit deletion, carried in the same `PUT` as a `deletions`
+array. Those apply before the writes — a device catching up sends both, and writing first would
+only have the rows taken back out again. Two guards on it:
+
+- a row deleted after an edit does not come back to life when that edit is pushed again
+- a delete does **not** take a row edited after it, so a tombstone sat in an offline queue cannot
+  quietly remove work done elsewhere in the meantime
+
+Whoever wrote last wins, compared on `updatedAt`, and the same stamp on both sides counts as the
+same edit and is left alone rather than written again.
+
+### Before you put it anywhere
+
+There is no TLS and no rate limiting yet, and a key is a bearer token — anything holding it is you.
+On a LAN behind the proxy that is the same deal the rest of the app already makes. On the open
+internet it is not, so do not put it there yet.
+
+The store is one sqlite file on a volume, `./data/taskboard.db` by default and `TASKBOARD_STORE`
+to move it. It is the one thing in the stack that cannot be rebuilt from the repo, so it is the one
+thing worth backing up.
+
 ## Hosting it on Unraid
 
 The app is a pile of static files. There is no server, no API and no database on the host, so any
@@ -204,8 +345,10 @@ static web server will do.
 
 ### Read this before you set it up
 
-**Hosting does not share your data.** Everything lives in the browser's IndexedDB on whatever device
-you are looking at. Serving the app from Unraid means every device can *load* it, but each one gets
+**Hosting does not share your data on its own.** Serving the app from Unraid means every device can
+load it, and each one still gets its own separate taskboard in its own IndexedDB. What joins them
+up is a key and the Sync panel above, not the hosting. Without one, everything lives in the
+browser's IndexedDB on whatever device you are looking at. Serving the app from Unraid means every device can *load* it, but each one gets
 its own separate, empty taskboard. Nothing syncs and nothing is backed up on the server. If what you
 want is one taskboard you can reach from the sofa and the desk, this alone will not give you that —
 that needs a real backend, which this project does not have.

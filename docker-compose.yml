@@ -5,4 +5,19 @@ services:
     # change the left hand number if 8080 is already taken on your unraid box
     ports:
       - "8080:80"
+    depends_on:
+      - taskboard-sync
+    restart: unless-stopped
+
+  # the boards themselves, for anyone who has made a key. the app still works without this
+  # running - it is local first, and a board with no key never asks the server anything
+  taskboard-sync:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: taskboard-sync
+    # no ports here on purpose. nginx proxies /api to it over the compose network, so the
+    # api is not on the LAN in its own right. publish 4320 only if you want to reach it direct
+    volumes:
+      - ./data:/data
     restart: unless-stopped

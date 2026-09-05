@@ -1,15 +1,18 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowDownUp, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, PlugZap, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowDownUp, ArrowLeft, Check, CloudUpload, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, PlugZap, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
 import Connect from "./Connect";
 import { useStayAwake } from "./awake";
 import ImportExport from "./ImportExport";
+import Sync from "./Sync";
 import { findBridge, pump } from "./bridge";
 import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
   mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
-  setNoteArchived, sweepNote, updateNote } from "./db";
+  setNoteArchived, sweepNote, updateColumn, updateNote } from "./db";
 import { boardTemplates } from "./templates";
+import type { SyncStatus } from "./server";
+import { describeSync, holdSync, readKey, startSync, subscribe } from "./server";
 import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
 
 const typeLabels: Record<NoteType, string> = { checklist: "Checklist", direction: "Direction", descriptor: "Descriptor", idea: "Idea" };
@@ -25,7 +28,7 @@ type Editing = { kind: "column" | "note" | "body" | "list" | "item" | "newColumn
 // the board, the archive and the walkthrough are three pages that take turns in the pane.
 // one value rather than a flag each, so two of them can never end up drawn on top of
 // each other the way they did when leaving one did not turn the other off
-type View = "board" | "archive" | "connect";
+type View = "board" | "archive" | "connect" | "sync";
 
 // notes move between columns, steps and whole checklists within a note, columns across the board
 type DragKind = "note" | "item" | "column" | "list";
@@ -135,6 +138,9 @@ function App() {
   const [confirming, setConfirming] = useState("");
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [view, setView] = useState<View>("board");
+  // only whether there is one, never the key itself. Sync is where it is read and shown
+  const [syncKey, setSyncKey] = useState(readKey());
+  const [sync, setSync] = useState<SyncStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
@@ -161,6 +167,15 @@ function App() {
   }
 
   useEffect(() => { database.open().then(refresh); }, []);
+
+  // boards keep themselves level with the server from here on: an edit settles then goes
+  // up, and what the other devices did comes down on a timer and whenever the tab is
+  // looked at again. the button in Sync is the same call, just asked for by hand
+  useEffect(() => subscribe(setSync), []);
+  useEffect(() => startSync(() => { void refreshRef.current(); }), []);
+
+  // a drag renumbers a whole column, so nothing is applied underneath one in flight
+  useEffect(() => { holdSync(Boolean(drag)); }, [drag]);
 
   // which board changes land on, read at tick time rather than captured when the loop started
   const openBoardRef = useRef("");
@@ -389,7 +404,7 @@ function App() {
       const width = widthAt(ended.clientX);
       setSizing(null);
       if (width === (category.width ?? defaultColumnWidth)) return;
-      await database.categories.update(category.id, { width });
+      await updateColumn(category.id, { width });
       refresh();
     };
 
@@ -401,7 +416,7 @@ function App() {
   // double click the edge and the column goes back to the default width
   async function resetWidth(category: Category) {
     if (category.width === undefined) return;
-    await database.categories.update(category.id, { width: undefined });
+    await updateColumn(category.id, { width: undefined });
     refresh();
   }
 
@@ -597,7 +612,7 @@ function App() {
   async function renameColumn(category: Category, name: string) {
     cancelEdit();
     if (!name.trim() || name.trim() === category.name) return;
-    await database.categories.update(category.id, { name: name.trim() }); refresh();
+    await updateColumn(category.id, { name: name.trim() }); refresh();
   }
 
   // position is scoped to the column, so only count the rows already in this one
@@ -916,17 +931,23 @@ function App() {
           <PlugZap size={17} />Connect Agents
           {settings.agentAccess && <span className={`note-count ${bridge?.listening ? "live" : ""}`}>{bridge?.listening ? "on" : "…"}</span>}
         </button>
+        <button className={`utility-button ${view === "sync" ? "active" : ""}`} onClick={() => openView(view === "sync" ? "board" : "sync")}>
+          <CloudUpload size={17} />Sync
+          {syncKey && <span className="note-count">on</span>}
+        </button>
         <button className={`utility-button ${showTransfer ? "active" : ""}`} onClick={() => setShowTransfer(true)}>
           <ArrowDownUp size={17} />Import &amp; export
         </button>
         <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
-        <div className="local-status"><span />Stored on this device</div>
+        <div className={`local-status ${sync?.state ?? ""}`}>
+          <span />{sync && syncKey ? describeSync(sync) : "Stored on this device"}
+        </div>
       </div>
     </aside>
 
     <section className="content">
       <header className="topbar">
-        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : activeBoard?.name ?? "No boards"}</strong></div>
+        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : view === "sync" ? "Sync" : activeBoard?.name ?? "No boards"}</strong></div>
         <div className="top-actions">
           <div className="search-box">
             <Search size={17} />
@@ -940,8 +961,9 @@ function App() {
       <div className="board-heading">
         <div>
           <div className="eyebrow"><Sparkles size={14} />Personal workspace</div>
-          <h1>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : activeBoard?.name ?? "No boards yet"}</h1>
+          <h1>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : view === "sync" ? "Sync" : activeBoard?.name ?? "No boards yet"}</h1>
           <p>{view === "archive" ? "Put things back, or clear them out for good."
+            : view === "sync" ? "Reach these boards from your other devices."
             : view === "connect" ? "Let an AI agent add tasks and tick them off for you."
             : "Keep the signal visible. Let the rest wait."}</p>
         </div>
@@ -980,6 +1002,10 @@ function App() {
         onTabAwake={() => toggleSetting("tabAwake")} onScreenAwake={() => toggleSetting("screenAwake")}
         board={activeBoard?.name} column={columns[0]?.name}
         onBack={() => openView("board")} />}
+
+      {view === "sync" && <Sync
+        onBack={() => openView("board")}
+        onPulled={async () => { await refresh(); setSyncKey(readKey()); }} />}
 
       {view === "archive" && <div className="archive-view">
         {!archivedCount && <div className="empty-board">
