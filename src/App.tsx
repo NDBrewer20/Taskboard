@@ -2,8 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
-  mapItems, moveColumn, moveNote, noteItems, placeNoteItem, setBoardArchived, setColumnArchived, setNoteArchived,
-  updateNote } from "./db";
+  mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
+  setNoteArchived, updateNote } from "./db";
 import { boardTemplates } from "./templates";
 import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
 
@@ -15,7 +15,7 @@ const listText = (lists: Checklist[]) => lists
   .join(" ");
 
 // what is currently swapped out for a text box
-type Editing = { kind: "column" | "note" | "body" | "list" | "newColumn" | "newStep" | "newList"; id: string };
+type Editing = { kind: "column" | "note" | "body" | "list" | "item" | "newColumn" | "newStep" | "newList"; id: string };
 
 // notes move between columns, steps and whole checklists within a note, columns across the board
 type DragKind = "note" | "item" | "column" | "list";
@@ -52,6 +52,41 @@ function InlineInput({ value = "", placeholder, multiline = false, onCommit, onC
     }} />;
 }
 
+// how the board looks and behaves. per device like the folds, so localStorage not dexie
+type Settings = {
+  collapsedDescription: boolean;
+  collapsedSteps: boolean;
+  rollUpSteps: boolean;
+  compactRows: boolean;
+};
+
+const defaultSettings: Settings = {
+  collapsedDescription: true,
+  collapsedSteps: true,
+  rollUpSteps: true,
+  compactRows: false,
+};
+
+const SETTINGS_KEY = "taskboard:settings";
+
+// anything missing falls back to its default, so adding a setting needs no migration
+function loadSettings(): Settings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return { ...defaultSettings, ...(raw ? JSON.parse(raw) as Partial<Settings> : {}) };
+  } catch { return { ...defaultSettings }; }
+}
+
+// what a folded task shows of its description. cut back to a word so it does not stop
+// halfway through one, and the newlines go flat so it stays on its two lines
+function shorten(text: string, limit = 130) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) return flat;
+  const cut = flat.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > limit * 0.6 ? cut.slice(0, space) : cut).replace(/[,.;:!?-]+$/, "")}\u2026`;
+}
+
 // which things are folded up. view state, so it lives in the browser not the database
 const COLLAPSE_KEY = "taskboard:collapsed";
 
@@ -76,6 +111,8 @@ function App() {
   const [confirming, setConfirming] = useState("");
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchive, setShowArchive] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState(loadSettings);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [drag, setDrag] = useState<{ kind: DragKind; id: string; noteId: string; title: string; x: number; y: number; width: number; height: number; container: string; index: number } | null>(null);
   const [sizing, setSizing] = useState<{ id: string; width: number } | null>(null);
@@ -101,7 +138,7 @@ function App() {
   // the topbar shows a ctrl+k hint, so make the key actually jump to search
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") { setIsCreating(false); setConfirming(""); return; }
+      if (event.key === "Escape") { setIsCreating(false); setShowSettings(false); setConfirming(""); return; }
       if (event.key.toLowerCase() !== "k" || !(event.metaKey || event.ctrlKey)) return;
       event.preventDefault();
       searchInput.current?.focus();
@@ -158,6 +195,25 @@ function App() {
       try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next])); } catch { /* private mode, fine */ }
       return next;
     });
+  }
+
+  function saveSettings(next: Settings) {
+    setSettings(next);
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch { /* private mode, fine */ }
+  }
+
+  const toggleSetting = (key: keyof Settings) => saveSettings({ ...settings, [key]: !settings[key] });
+
+  // unfolds everything on every board, the way out of a board you have folded to nothing
+  function expandEverything() {
+    setCollapsed(new Set());
+    try { localStorage.setItem(COLLAPSE_KEY, "[]"); } catch { /* private mode, fine */ }
+  }
+
+  // drops the width off every column, so they all go back to the default
+  async function resetColumnWidths() {
+    await database.categories.toCollection().modify((row) => { delete row.width; });
+    refresh();
   }
 
   // adding a sub list to a folded step would drop it out of sight, so open it back up
@@ -604,12 +660,38 @@ function App() {
     startEdit("newStep", ownerId);
   }
 
-  const toggleItem = (note: Note, itemId: string) =>
-    saveChecklists(note, withItem(note, itemId, (item) => ({ ...item, completed: !item.completed })));
+  // with roll up on a step carries its sub steps with it, then everything above it catches
+  // up, so a step is ticked exactly when all of its own sub steps are
+  function toggleItem(note: Note, itemId: string) {
+    const target = findItem(note.checklists, itemId);
+    if (!target) return;
+
+    const completed = !target.completed;
+    const flip = (item: ChecklistItem): ChecklistItem => settings.rollUpSteps
+      ? { ...item, completed, items: item.items.map(flip) }
+      : { ...item, completed };
+
+    const ticked = withItem(note, itemId, flip);
+    saveChecklists(note, settings.rollUpSteps ? rollUpNote(ticked) : ticked);
+  }
 
   // removing a step takes its sub steps with it, they only exist under it
+  async function renameItem(note: Note, item: ChecklistItem, text: string) {
+    cancelEdit();
+    if (!text.trim() || text.trim() === item.text) return;
+    saveChecklists(note, withItem(note, item.id, (current) => ({ ...current, text: text.trim() })));
+  }
+
   const removeItem = (note: Note, itemId: string) =>
     saveChecklists(note, dropNoteItem(note.checklists, itemId));
+
+  // one switch in the settings menu
+  const settingRow = (key: keyof Settings, title: string, blurb: string) =>
+    <button type="button" className={`setting-row ${settings[key] ? "on" : ""}`} role="switch" aria-checked={settings[key]}
+      onClick={() => toggleSetting(key)}>
+      <span className="setting-what"><strong>{title}</strong><small>{blurb}</small></span>
+      <span className="switch"><span /></span>
+    </button>;
 
   // one checklist. the count and the bar track its top level steps, what indents under
   // them rolls up on the step itself rather than in here
@@ -682,12 +764,16 @@ function App() {
               {itemShut ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button>
           : <span className="fold-spacer" />}
         <button className="row-action drag-handle" onPointerDown={(event) => beginItemDrag(event, note, item.id, item.text)} aria-label={`Move ${item.text}`}><GripVertical size={12} /></button>
-        <button className="check-toggle" onClick={() => toggleItem(note, item.id)}>
-          {item.completed ? <SquareCheckBig size={15} /> : <Square size={15} />}<span>{item.text}</span>
+        <button className="check-toggle" onClick={() => toggleItem(note, item.id)} aria-label={item.completed ? `Untick ${item.text}` : `Tick ${item.text}`}>
+          {item.completed ? <SquareCheckBig size={15} /> : <Square size={15} />}
         </button>
-        {nested.length > 0 && <span className="checklist-count">{nestedDone} of {nested.length}</span>}
-        <button className="row-action" onClick={() => { expand(item.id); startEdit("newStep", item.id); }} aria-label={`Add a step under ${item.text}`} title="Add sub step"><ListTree size={12} /></button>
-        <button className="row-action" onClick={() => removeItem(note, item.id)} aria-label={`Remove ${item.text}`}><X size={13} /></button>
+        {isEditing("item", item.id)
+          ? <InlineInput value={item.text} placeholder="Step"
+              onCommit={(text) => renameItem(note, item, text)} onCancel={cancelEdit} />
+          : <><button className="check-text" onClick={() => startEdit("item", item.id)}>{item.text}</button>
+              {nested.length > 0 && <span className="checklist-count">{nestedDone} of {nested.length}</span>}
+              <button className="row-action" onClick={() => { expand(item.id); startEdit("newStep", item.id); }} aria-label={`Add a step under ${item.text}`} title="Add sub step"><ListTree size={12} /></button>
+              <button className="row-action" onClick={() => removeItem(note, item.id)} aria-label={`Remove ${item.text}`}><X size={13} /></button></>}
       </div>
 
       {/* past a few levels the indent stops growing, otherwise the text ends up a letter
@@ -711,7 +797,7 @@ function App() {
         <button className={`utility-button ${showArchive ? "active" : ""}`} onClick={() => { if (showArchive) leaveArchive(); else setShowArchive(true); }}>
           <Archive size={17} />Archive{archivedCount > 0 && <span className="note-count">{archivedCount}</span>}
         </button>
-        <button className="utility-button"><Settings2 size={17} />Settings</button>
+        <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
         <div className="local-status"><span />Stored on this device</div>
       </div>
     </aside>
@@ -825,7 +911,7 @@ function App() {
         </p>}
       </div>}
 
-      {activeBoard && !showArchive && <div className="board-columns" ref={boardRef} data-board-id={activeBoard.id}>
+      {activeBoard && !showArchive && <div className={`board-columns ${settings.compactRows ? "compact" : ""}`} ref={boardRef} data-board-id={activeBoard.id}>
         {laidOutColumns.map((category, columnIndex) => {
           const rows = rowsFor(category.id).filter((note) => !(drag?.kind === "note" && note.id === drag.id));
           const slotAt = (index: number) => drag?.kind === "note" && drag.container === category.id && drag.index === index;
@@ -877,13 +963,19 @@ function App() {
                           <button className="row-action" onClick={() => archiveNote(note)} aria-label={`Archive ${note.title}`} title="Archive this task"><Archive size={14} /></button></>}
                   </div>
 
-                  {noteShut ? <div className="note-collapsed">
+                  {noteShut ? <>
+                    <div className="note-collapsed">
                       <span className={`note-type ${note.type}`}>{typeLabels[note.type]}</span>
-                      {note.checklists.length > 0 && <span>
+                      {settings.collapsedSteps && note.checklists.length > 0 && <span>
                         {noteItems(note.checklists).filter((item) => item.completed).length} of {noteItems(note.checklists).length} steps
                         {" in "}{plural(note.checklists.length, "checklist")}
                       </span>}
-                    </div> : <>
+                      {settings.collapsedDescription && note.content && <p className="note-preview">{shorten(note.content)}</p>}
+                    </div>
+
+                    {/* folded or not the date stays, folding just drops the buttons */}
+                    <div className="note-footer folded"><span>{shortDate(note.updatedAt)}</span></div>
+                  </> : <>
 
                   <span className={`note-type ${note.type}`}>{typeLabels[note.type]}</span>
 
@@ -947,6 +1039,39 @@ function App() {
     </section>
 
     {drag && <div className={`drag-ghost ${drag.kind === "item" ? "step" : drag.kind === "column" ? "column" : ""}`} style={{ left: drag.x, top: drag.y }}>{drag.title}</div>}
+
+    {showSettings && <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+      <div className="modal" onClick={(event) => event.stopPropagation()}>
+        <header className="modal-head">
+          <div><strong>Settings</strong><span>How the board looks and works on this device.</span></div>
+          <button type="button" className="icon-button" onClick={() => setShowSettings(false)} aria-label="Close"><X size={17} /></button>
+        </header>
+
+        <div className="field-label">Folded tasks</div>
+        <div className="setting-group">
+          {settingRow("collapsedDescription", "Show a shortened description", "A folded task keeps the start of its description, cut to a couple of lines.")}
+          {settingRow("collapsedSteps", "Show the step count", "How many steps are done, and how many checklists they sit in.")}
+        </div>
+
+        <div className="field-label">Checklists</div>
+        <div className="setting-group">
+          {settingRow("rollUpSteps", "Sub steps drive the step above them", "Ticking a step ticks everything under it, and a step ticks itself once all of its sub steps are done.")}
+        </div>
+
+        <div className="field-label">Board</div>
+        <div className="setting-group">
+          {settingRow("compactRows", "Tighter spacing", "Less padding on the rows, so more of the column fits on screen.")}
+          <div className="setting-actions">
+            <button type="button" className="ghost-button small" onClick={expandEverything}><ChevronDown size={14} />Unfold everything</button>
+            <button type="button" className="ghost-button small" onClick={resetColumnWidths}><Columns3 size={14} />Reset column widths</button>
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="primary-button" onClick={() => setShowSettings(false)}>Done</button>
+        </div>
+      </div>
+    </div>}
 
     {isCreating && <div className="modal-overlay" onClick={() => setIsCreating(false)}>
       <form className="modal" onClick={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); createBoard(); }}>

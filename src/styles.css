@@ -91,6 +91,12 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 .column-rows { display: grid; gap: 9px; padding: 11px; overflow-y: auto; min-height: 54px; align-content: start; }
 .column-empty { color: var(--faint); font-size: 12px; padding: 10px 4px 14px; }
 
+/* tighter spacing, the board setting for fitting more of a column on screen */
+.board-columns.compact .column-rows { gap: 6px; padding: 8px; }
+.board-columns.compact .note-row { --note-indent: 40px; padding: 9px; }
+.board-columns.compact .checklist-group { margin-top: 8px; padding: 7px 9px 6px; }
+.board-columns.compact .note-footer { margin-top: 8px; }
+
 /* each note is a row in its column */
 .note-row { --note-indent: 52px; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); padding: 12px; display: flex; flex-direction: column; animation: reveal .35s both; }
 .note-row:hover { border-color: #3a3846; }
@@ -123,13 +129,13 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 .progress { height: 3px; border-radius: 2px; background: #2f2d3a; overflow: hidden; margin: 2px 0 3px; }
 .progress span { display: block; height: 100%; background: var(--teal); border-radius: 2px; transition: width .25s; }
 .check-item { display: flex; align-items: center; gap: 3px; }
-.check-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; text-align: left; background: transparent; color: var(--muted); font-size: 12px; padding: 2px 0; }
-.check-toggle span { overflow-wrap: break-word; min-width: 0; }
+.check-toggle { flex: 0 0 auto; display: grid; place-items: center; background: transparent; color: var(--muted); padding: 2px 0 2px 2px; }
 .check-toggle:hover { color: var(--ink); }
-.check-toggle svg { flex: 0 0 auto; }
-.check-item.done .check-toggle { color: var(--faint); }
-.check-item.done .check-toggle span { text-decoration: line-through; text-decoration-color: var(--faint); }
-.check-item.done .check-toggle svg { color: var(--teal); }
+.check-text { flex: 1; min-width: 0; text-align: left; background: transparent; color: var(--muted); font-size: 12px; padding: 2px 0 2px 8px; overflow-wrap: break-word; }
+.check-text:hover { color: var(--coral); }
+.check-item.done .check-text { color: var(--faint); text-decoration: line-through; text-decoration-color: var(--faint); }
+.check-item.done .check-toggle { color: var(--teal); }
+.check-item .inline-input { font-size: 12px; margin-left: 6px; }
 .add-item.indented { justify-self: start; margin-top: 2px; }
 
 /* a step and whatever indents under it move as one, so they share a wrapper */
@@ -142,9 +148,10 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 /* the spacer only lines text up under the chevron, deep down the width is worth more */
 .sub-steps.tight .fold-spacer { width: 4px; }
 .sub-steps .step-composer { margin-top: 1px; }
-.sub-steps .check-toggle { font-size: 11.5px; }
+.sub-steps .check-text { font-size: 11.5px; }
 
 .note-footer { margin-top: 12px; padding-left: var(--note-indent); display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--faint); font-size: 10px; }
+.note-footer.folded { margin-top: 7px; justify-content: flex-end; }
 .footer-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
 .note-footer > span { white-space: nowrap; }
 .add-item { display: flex; align-items: center; gap: 5px; background: transparent; color: var(--faint); font-size: 10px; padding: 3px 6px 3px 3px; border-radius: 5px; }
@@ -202,6 +209,8 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .strip-count { font-size: 11px; color: var(--faint); }
 .note-collapsed { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; padding-left: var(--note-indent); color: var(--faint); font-size: 10px; }
 .note-collapsed .note-type { margin-top: 0; padding-left: 0; }
+.note-preview { width: 100%; color: var(--muted); font-size: 11.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.completed .note-preview { color: var(--faint); }
 .checklist-group.collapsed { gap: 3px; }
 .checklist-head .row-action { opacity: .55; }
 .checklist-group:hover .checklist-head .row-action { opacity: 1; }
@@ -238,6 +247,20 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .template-preview .faint { color: var(--faint); border-style: dashed; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+
+/* one switch per setting, the whole row is the control */
+.setting-group { display: grid; gap: 8px; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; width: 100%; text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 9px; padding: 12px 13px; }
+.setting-row:hover { border-color: #46434f; background: var(--raised); }
+.setting-what { display: grid; gap: 3px; }
+.setting-what strong { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.setting-what small { font-size: 11px; color: var(--faint); line-height: 1.45; }
+.switch { flex: 0 0 auto; width: 34px; height: 19px; border-radius: 999px; background: #2f2d3a; padding: 2px; display: flex; transition: background .18s; }
+.switch > span { width: 15px; height: 15px; border-radius: 50%; background: var(--faint); transition: transform .18s, background .18s; }
+.setting-row.on .switch { background: rgba(240, 141, 120, .32); }
+.setting-row.on .switch > span { transform: translateX(15px); background: var(--coral); }
+.setting-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
+.setting-actions .ghost-button { display: flex; align-items: center; gap: 6px; }
 .ghost-button { background: transparent; border: 1px solid var(--line); border-radius: 7px; padding: 11px 15px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .ghost-button:hover { color: var(--ink); border-color: #46434f; }
 

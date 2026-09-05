@@ -197,6 +197,16 @@ export function placeItem(items: ChecklistItem[], ownerId: string, moving: Check
     : { ...item, items: placeItem(item.items, ownerId, moving, index) });
 }
 
+// a step that has sub steps is only done when they all are, worked out from the bottom up
+export function rollUp(items: ChecklistItem[]): ChecklistItem[] {
+  return items.map((item) => {
+    const nested = rollUp(item.items);
+    return { ...item, items: nested, completed: nested.length ? nested.every((step) => step.completed) : item.completed };
+  });
+}
+
+export const rollUpNote = (lists: Checklist[]) => lists.map((list) => ({ ...list, items: rollUp(list.items) }));
+
 // same two, lifted to the note so a step can move between its checklists as well
 export const dropNoteItem = (lists: Checklist[], itemId: string) =>
   lists.map((list) => ({ ...list, items: dropItem(list.items, itemId) }));
