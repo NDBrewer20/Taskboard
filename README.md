@@ -417,8 +417,28 @@ Renaming a board.
 
 ## Agents
 
-The board can be driven by an AI agent: it reads what is there, adds boards, columns and
-tasks, adds checklist steps under other steps, ticks things off and archives them.
+The board can be driven by an AI agent, and it can do everything the board can rather than only
+add: it reads what is there, makes boards, columns and tasks, renames and recolours them, moves
+tasks between columns, reworks checklists, ticks things off and archives them.
+
+| Tool | What |
+| --- | --- |
+| `taskboard_board` | read the whole board, with what is done |
+| `taskboard_add_board` `taskboard_rename_board` | make a board, rename one |
+| `taskboard_add_column` `taskboard_update_column` `taskboard_move_column` | make a column, rename or recolour it, shift it left or right |
+| `taskboard_add_task` `taskboard_update_task` `taskboard_move_task` | make a task, change its title, description or type, move it between columns |
+| `taskboard_add_checklist` `taskboard_add_step` `taskboard_update_step` `taskboard_remove_step` | group steps, add them under other steps, reword one, take one off |
+| `taskboard_complete` | tick a task or a step off, or untick it |
+| `taskboard_archive` | take a task, a column or a whole board off the board, or put one back |
+
+**An agent cannot delete anything for good.** Archiving is as far as it goes, and everything it
+archives comes back from the archive the same as if you had done it by hand. The one exception is
+`taskboard_remove_step`, because a step is part of its task rather than a row of its own — there is
+no archive for one to sit in, exactly as the `X` on it in the board deletes it outright. It says so
+on the tool, and archiving the task is the answer if you might want it back.
+
+Every tool takes a `board`, so an agent can work on a board that is not the one at the top of the
+sidebar. Leave it out and it means the open board, which really is just the first live one.
 
 The connector is a plain MCP server over stdio, so anything that speaks MCP can drive the
 board - Claude Code, Cursor, Zed, VS Code, your own script. Claude Code is the worked example
