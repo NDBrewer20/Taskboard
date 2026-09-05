@@ -312,20 +312,29 @@ walkthrough.
 
 ### Leaving it running
 
-Agent access polls every couple of seconds, which is no use if the display has gone to sleep and
-taken the machine with it. **Keep the screen awake** under agent access takes a screen wake lock
-while the two are on. What it does not do:
+Two different things stop a board left running unattended: the browser putting the **tab** to
+sleep, and the machine putting the **display** to sleep. There is a switch for each under agent
+access, and both only do anything while agent access is on. `src/awake.ts` holds the pair as
+`useStayAwake(keepTab, keepScreen)`.
 
-- **It does not keep a hidden tab working.** The browser hands the lock back the moment the tab
-  stops being the visible one, and will not give it again until you are looking at the tab. A
-  minimised board still gets its timers throttled, lock or no lock. The chip under the switch says
-  `Paused` when that happens.
-- **It needs a secure context**, the same as `crypto.randomUUID` in `src/db.ts`. Over plain http
-  `navigator.wakeLock` does not exist at all, so on a self hosted board the switch is disabled and
-  says so. Open it on `localhost` or put it behind https to get it.
+**Keep this tab awake** is the one that matters for an agent, because it is the one that carries
+on while you are looking at something else. There is no API for "leave this tab alone", but no
+browser throttles, freezes or discards a tab that is playing audio, so that is what it holds: a one
+second loop built as a WAV blob at run time, 8kHz mono, a 30Hz tone at about -46 dBFS peak and
+-49 dBFS RMS. Too low for a speaker to reproduce, and comfortably above the -72 dBFS a browser
+counts as silence. Exactly 30 cycles fit the second so the loop comes round without a click, and
+there is no audio asset to ship.
 
-The lock lives in `src/awake.ts` as `useStayAwake(active)`, and it listens for the browser taking
-the lock back rather than assuming it still holds it - battery saver drops it too.
+Two costs, both said on the switch: the tab shows the speaker icon while it runs, and nothing
+plays until the page has had a gesture. Flipping the switch is one, but the setting is remembered,
+so after a reload it waits and the chip says to click. It works over plain http.
+
+**Keep the screen awake** takes a screen wake lock, which stops the display sleeping and taking the
+machine with it. It is only held while this is the tab you are looking at - the browser hands it
+straight back when you switch away, which is why it is no use for the background case on its own -
+and it needs a secure context, so it does nothing on a self hosted board over plain http. It
+listens for the release event rather than assuming it still holds the lock, since battery saver
+takes it too.
 
 ### Not getting the tab put to sleep
 

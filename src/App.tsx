@@ -69,7 +69,8 @@ type Settings = {
   rollUpSteps: boolean;
   compactRows: boolean;
   agentAccess: boolean;
-  stayAwake: boolean;
+  tabAwake: boolean;
+  screenAwake: boolean;
 };
 
 const defaultSettings: Settings = {
@@ -79,8 +80,10 @@ const defaultSettings: Settings = {
   compactRows: false,
   // off until you walk through Connect Agents, nothing reaches out on its own
   agentAccess: false,
-  // and off until you ask, since holding the screen open stops it locking itself
-  stayAwake: false,
+  // and both off until you ask. one puts a speaker icon on the tab, the other stops the
+  // screen locking itself, and neither is a thing to switch on for somebody
+  tabAwake: false,
+  screenAwake: false,
 };
 
 const SETTINGS_KEY = "taskboard:settings";
@@ -235,9 +238,9 @@ function App() {
     };
   }, [settings.agentAccess]);
 
-  // the screen only needs holding open while there is something to watch, so the lock
-  // follows agent access rather than the switch on its own
-  const awake = useStayAwake(settings.agentAccess && settings.stayAwake);
+  // both only mean anything while there is something running to keep awake for, so they
+  // follow agent access rather than standing on their own
+  const awake = useStayAwake(settings.agentAccess && settings.tabAwake, settings.agentAccess && settings.screenAwake);
 
   // the topbar shows a ctrl+k hint, so make the key actually jump to search
   useEffect(() => {
@@ -973,7 +976,8 @@ function App() {
       {view === "connect" && <Connect
         bridge={bridge} log={bridgeLog} access={settings.agentAccess}
         onAccess={() => toggleSetting("agentAccess")}
-        awake={awake} stayAwake={settings.stayAwake} onStayAwake={() => toggleSetting("stayAwake")}
+        awake={awake} tabAwake={settings.tabAwake} screenAwake={settings.screenAwake}
+        onTabAwake={() => toggleSetting("tabAwake")} onScreenAwake={() => toggleSetting("screenAwake")}
         board={activeBoard?.name} column={columns[0]?.name}
         onBack={() => openView("board")} />}
 

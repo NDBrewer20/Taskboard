@@ -53,23 +53,24 @@ function Step({ index, done, title, children }: {
   </section>;
 }
 
-// what the screen lock is actually doing, in the words of what it means for you
-const awakeWords: Record<AwakeState, { state: "on" | "waiting" | "off"; text: string }> = {
-  held: { state: "on", text: "The screen is being kept awake" },
-  paused: { state: "waiting", text: "Paused while this tab is in the background" },
-  blocked: { state: "off", text: "The browser took the lock back, battery saver usually" },
-  off: { state: "off", text: "Switched off" },
-  unsupported: { state: "off", text: "Not available over plain http, open the board on https or localhost" },
-};
+// one switch, told the way it reads on the page
+function Toggle({ on, title, blurb, onToggle }: { on: boolean; title: string; blurb: string; onToggle: () => void }) {
+  return <button className={`setting-row ${on ? "on" : ""}`} role="switch" aria-checked={on} onClick={onToggle}>
+    <span className="setting-what"><strong>{title}</strong><small>{blurb}</small></span>
+    <span className="switch"><span /></span>
+  </button>;
+}
 
-export default function Connect({ bridge, log, access, onAccess, awake, stayAwake, onStayAwake, board, column, onBack }: {
+export default function Connect({ bridge, log, access, onAccess, awake, tabAwake, screenAwake, onTabAwake, onScreenAwake, board, column, onBack }: {
   bridge: BridgeHealth | null;
   log: OpResult[];
   access: boolean;
   onAccess: () => void;
   awake: AwakeState;
-  stayAwake: boolean;
-  onStayAwake: () => void;
+  tabAwake: boolean;
+  screenAwake: boolean;
+  onTabAwake: () => void;
+  onScreenAwake: () => void;
   board?: string;
   column?: string;
   onBack: () => void;
@@ -79,11 +80,21 @@ export default function Connect({ bridge, log, access, onAccess, awake, stayAwak
   const agentSeen = Boolean(bridge?.mcp);
   const connected = Boolean(bridge?.listening) && access;
 
-  // the lock follows agent access, so the switch being on is not the whole story
-  const screen = awake === "unsupported" ? awakeWords.unsupported
-    : !stayAwake ? null
-    : !access ? { state: "waiting" as const, text: "On, but nothing to stay awake for until agent access is" }
-    : awakeWords[awake];
+  // both follow agent access, so a switch being on is not the whole story. and the tab one
+  // can be on and still not running, since nothing plays until you have clicked something
+  const waitingOnAccess = { state: "waiting" as const, text: "On, but nothing to keep awake until agent access is" };
+
+  const tabChip = !tabAwake ? null
+    : !access ? waitingOnAccess
+    : awake.tab === "awake" ? { state: "on" as const, text: "The tab is being kept awake" }
+    : awake.tab === "waiting" ? { state: "waiting" as const, text: "Click anywhere on the board to start it off" }
+    : { state: "off" as const, text: "The browser would not let it start" };
+
+  const screenChip = !screenAwake ? null
+    : !("wakeLock" in navigator) ? { state: "off" as const, text: "Not available over plain http, open the board on https or localhost" }
+    : !access ? waitingOnAccess
+    : awake.screen ? { state: "on" as const, text: "The screen is being kept awake" }
+    : { state: "waiting" as const, text: "Held only while this is the tab you are looking at" };
 
   // what this browser calls putting a tab to sleep, and where it keeps the way out of it
   const guide = browserGuide();
@@ -157,33 +168,27 @@ export default function Connect({ bridge, log, access, onAccess, awake, stayAwak
 
     <Step index={2} done={connected} title="Let this board listen">
       <p>The board checks for work every couple of seconds while this is on. Turn it off any time.</p>
-      <button className={`setting-row ${access ? "on" : ""}`} role="switch" aria-checked={access} onClick={onAccess}>
-        <span className="setting-what">
-          <strong>Agent access</strong>
-          <small>{board ? `Changes land on "${board}", the board you have open.` : "Open a board first."}</small>
-        </span>
-        <span className="switch"><span /></span>
-      </button>
+      <Toggle on={access} onToggle={onAccess} title="Agent access"
+        blurb={board ? `Changes land on "${board}", the board you have open.` : "Open a board first."} />
       {connected
         ? <Chip state="on">Connected</Chip>
         : access ? <Chip state="waiting">Waiting for an agent</Chip> : <Chip state="off">Switched off</Chip>}
 
       <p className="faint-note">
-        <MonitorCheck size={12} /> Left running unattended, the display going to sleep usually takes the machine
-        with it and the board stops asking. This holds the screen open while agent access is on.
+        <MonitorCheck size={12} /> Two different things get in the way of leaving this running unattended: the
+        browser putting the tab to sleep, and the machine putting the display to sleep. One switch each.
       </p>
-      <button className={`setting-row ${stayAwake ? "on" : ""}`} role="switch" aria-checked={stayAwake}
-        onClick={onStayAwake} disabled={awake === "unsupported"}>
-        <span className="setting-what">
-          <strong>Keep the screen awake</strong>
-          <small>
-            Only while this tab is the one you are looking at. Switching away hands the lock back, and a tab in the
-            background gets throttled whatever this says.
-          </small>
-        </span>
-        <span className="switch"><span /></span>
-      </button>
-      {screen && <Chip state={screen.state}>{screen.text}</Chip>}
+      <Toggle on={tabAwake} onToggle={onTabAwake} title="Keep this tab awake"
+        blurb={"Plays a loop too quiet to hear. No browser throttles, freezes or closes down a tab that is playing "
+          + "something, and unlike the screen lock it carries on while you are looking elsewhere. The tab shows the "
+          + "speaker icon while it runs."} />
+      {tabChip && <Chip state={tabChip.state}>{tabChip.text}</Chip>}
+
+      <Toggle on={screenAwake} onToggle={onScreenAwake} title="Keep the screen awake"
+        blurb={"Stops the display sleeping and taking the machine with it. Only counts while this is the tab you "
+          + "are looking at, and it needs https or localhost, so it is the one that does nothing on a self hosted "
+          + "board over plain http."} />
+      {screenChip && <Chip state={screenChip.state}>{screenChip.text}</Chip>}
     </Step>
 
     <Step index={3} done={log.length > 0} title="Try it">
