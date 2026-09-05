@@ -4,3 +4,6 @@ dist
 *.local
 .DS_Store
 *.tsbuildinfo
+
+# the sync store, made at run time and never committed
+data/

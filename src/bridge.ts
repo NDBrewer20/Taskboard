@@ -4,9 +4,10 @@
 // builders the UI uses so positions and types stay right, and posts back the board plus a
 // line about what each op did. Everything still lives in the browser, nothing is exported.
 
-import { allItems, buildBoard, buildChecklist, buildColumn, buildItem, buildNote, database, noteItems, rollUpNote,
-  setNoteArchived, sweepNote, updateNote } from "./db";
-import type { Board, Category, Checklist, ChecklistItem, Note } from "./types";
+import { allItems, buildBoard, buildChecklist, buildColumn, buildItem, buildNote, columnColors, database,
+  dropNoteItem, mapItems, moveColumn, moveNote, noteItems, rollUpNote, setBoardArchived, setColumnArchived,
+  setNoteArchived, sweepNote, updateBoard, updateColumn, updateNote } from "./db";
+import type { Board, Category, Checklist, ChecklistItem, Note, NoteType } from "./types";
 
 // the connector runs inside the agent on this machine, so there is only ever one place
 // to look. loopback, never anywhere else
@@ -27,6 +28,13 @@ export type BridgeOp = {
   description?: string;
   steps?: string[];
   done?: boolean;
+  // an archive op that is putting something back rather than taking it off the board. it
+  // also decides which pool the thing is looked for in, since what is archived is filtered
+  // out of the live one
+  restore?: boolean;
+  color?: string;
+  noteType?: string;
+  index?: number;
 };
 
 export type OpResult = { id: string; ok: boolean; message: string };
@@ -90,12 +98,22 @@ function rollUpWanted() {
   } catch { return true; }
 }
 
-async function boardFor(name?: string): Promise<Found<Board>> {
-  const boards = (await database.boards.orderBy("position").toArray()).filter((row) => !row.archivedAt);
-  if (!boards.length) return { error: "There are no boards yet." };
-  // no name given means whatever board is open, which is the first live one
-  if (!name) return { row: boards[0] };
-  return pick(boards, name, (row) => row.name, "board");
+async function boardFor(name?: string, archivedToo = false): Promise<Found<Board>> {
+  const all = await database.boards.orderBy("position").toArray();
+  const live = all.filter((row) => !row.archivedAt);
+
+  // no name given means whatever board is open, which is the first live one. an archived
+  // board is never that, however it was asked for
+  if (!name) {
+    if (!live.length) return { error: "There are no boards yet." };
+    return { row: live[0] };
+  }
+
+  // putting a board back means finding it first, and an archived one is exactly what the
+  // live list leaves out
+  const pool = archivedToo ? all : live;
+  if (!pool.length) return { error: "There are no boards yet." };
+  return pick(pool, name, (row) => row.name, "board");
 }
 
 async function columnsOf(boardId: string) {
@@ -109,6 +127,17 @@ async function tasksOf(boardId: string) {
   const columns = await columnsOf(boardId);
   const ids = new Set(columns.map((column) => column.id));
   return (await database.notes.toArray()).filter((note) => ids.has(note.categoryId) && !note.archivedAt);
+}
+
+/* Putting something back has to be able to find it, and what is archived is exactly what the
+   two above leave out. So a restore looks in these instead - the same rows, unfiltered. */
+
+const everyColumnOf = async (boardId: string) =>
+  (await database.categories.where("boardId").equals(boardId).toArray()).sort((a, b) => a.position - b.position);
+
+async function everyTaskOf(boardId: string) {
+  const ids = new Set((await everyColumnOf(boardId)).map((column) => column.id));
+  return (await database.notes.toArray()).filter((note) => ids.has(note.categoryId));
 }
 
 // puts a step on a task, either at the top of a checklist or under an existing step
@@ -131,7 +160,7 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
     return said(true, `Added the board "${op.name.trim()}".`);
   }
 
-  const board = await boardFor(op.board);
+  const board = await boardFor(op.board, op.restore === true);
   if (board.error) return said(false, board.error);
   const boardId = board.row!.id;
 
@@ -140,6 +169,54 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
     const columns = await columnsOf(boardId);
     await database.categories.add(buildColumn(boardId, op.name.trim(), columns.length));
     return said(true, `Added the column "${op.name.trim()}" to ${board.row!.name}.`);
+  }
+
+  if (op.type === "renameBoard") {
+    if (!op.name?.trim()) return said(false, "A board needs a name.");
+    const was = board.row!.name;
+    await updateBoard(boardId, { name: op.name.trim() });
+    return said(true, `Renamed the board "${was}" to "${op.name.trim()}".`);
+  }
+
+  if (op.type === "archiveBoard") {
+    await setBoardArchived(boardId, !op.restore);
+    return said(true, op.restore
+      ? `Put the board "${board.row!.name}" back.`
+      : `Archived the board "${board.row!.name}", with its columns and their tasks.`);
+  }
+
+  // the column ops, which all need one found first
+  if (op.type === "updateColumn" || op.type === "archiveColumn" || op.type === "moveColumn") {
+    const pool = op.restore ? await everyColumnOf(boardId) : await columnsOf(boardId);
+    const found = pick(pool, op.column, (row) => row.name, "column");
+    if (found.error) return said(false, found.error);
+    const column = found.row!;
+
+    if (op.type === "archiveColumn") {
+      await setColumnArchived(column.id, !op.restore);
+      return said(true, op.restore
+        ? `Put the column "${column.name}" back.`
+        : `Archived the column "${column.name}" and the tasks in it.`);
+    }
+
+    if (op.type === "moveColumn") {
+      if (!Number.isFinite(op.index)) return said(false, "Which position should it go to?");
+      await moveColumn(column.id, Math.max(0, Math.trunc(op.index!)));
+      return said(true, `Moved the column "${column.name}".`);
+    }
+
+    const changes: Partial<Category> = {};
+    if (op.name?.trim()) changes.name = op.name.trim();
+    if (op.color) {
+      if (!columnColors.includes(op.color)) {
+        return said(false, `"${op.color}" is not one of the colours: ${columnColors.join(", ")}.`);
+      }
+      changes.color = op.color;
+    }
+    if (!Object.keys(changes).length) return said(false, "Nothing to change on that column.");
+
+    await updateColumn(column.id, changes);
+    return said(true, `Changed the column "${column.name}".`);
   }
 
   if (op.type === "createTask") {
@@ -163,7 +240,7 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
   }
 
   // everything below works on a task, so find it once
-  const task = pick(await tasksOf(boardId), op.task, (row) => row.title, "task");
+  const task = pick(await (op.restore ? everyTaskOf(boardId) : tasksOf(boardId)), op.task, (row) => row.title, "task");
   if (task.error) return said(false, task.error);
   const note = task.row!;
 
@@ -223,9 +300,90 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
     return said(true, `${done ? "Ticked off" : "Reopened"} "${note.title}"${tail}.`);
   }
 
+  if (op.type === "updateTask") {
+    const changes: Partial<Note> = {};
+    if (op.title?.trim()) changes.title = op.title.trim();
+    // a description is the one thing you might want to clear, so an empty string counts
+    if (typeof op.description === "string") changes.content = op.description.trim();
+    if (op.noteType) {
+      const types: NoteType[] = ["checklist", "direction", "descriptor", "idea"];
+      if (!types.includes(op.noteType as NoteType)) {
+        return said(false, `"${op.noteType}" is not one of the types: ${types.join(", ")}.`);
+      }
+      changes.type = op.noteType as NoteType;
+    }
+    if (!Object.keys(changes).length) return said(false, "Nothing to change on that task.");
+
+    await updateNote(note.id, { ...changes, updatedAt: stamp() });
+    return said(true, `Changed "${note.title}".`);
+  }
+
+  if (op.type === "moveTask") {
+    // staying in the same column and just moving up or down is a move too, so the column
+    // is optional and defaults to the one it is already in
+    let categoryId = note.categoryId;
+    if (op.column) {
+      const found = pick(await columnsOf(boardId), op.column, (row) => row.name, "column");
+      if (found.error) return said(false, found.error);
+      categoryId = found.row!.id;
+    }
+
+    const sitting = (await database.notes.toArray())
+      .filter((row) => row.categoryId === categoryId && !row.archivedAt && row.id !== note.id);
+    const index = Number.isFinite(op.index) ? Math.max(0, Math.trunc(op.index!)) : sitting.length;
+
+    await moveNote(note.id, categoryId, index);
+    const where = op.column ? ` to ${op.column}` : "";
+    return said(true, `Moved "${note.title}"${where}.`);
+  }
+
+  if (op.type === "addChecklist") {
+    const name = op.checklist?.trim() || op.name?.trim();
+    if (!name) return said(false, "A checklist needs a name.");
+    if (note.checklists.some((list) => list.name.toLowerCase() === name.toLowerCase())) {
+      return said(false, `"${note.title}" already has a checklist called "${name}".`);
+    }
+
+    await updateNote(note.id, {
+      checklists: [...note.checklists, buildChecklist(name)], type: "checklist", updatedAt: stamp(),
+    });
+    return said(true, `Added the checklist "${name}" to "${note.title}".`);
+  }
+
+  if (op.type === "updateStep") {
+    if (!op.text?.trim()) return said(false, "A step needs some text.");
+    const found = findStep(note, op.step ?? "");
+    if (found.error) return said(false, found.error);
+
+    const was = found.row!.text;
+    const checklists = note.checklists.map((list) => ({
+      ...list,
+      items: mapItems(list.items, (item) => (item.id === found.row!.id ? { ...item, text: op.text!.trim() } : item)),
+    }));
+
+    await updateNote(note.id, { checklists, updatedAt: stamp() });
+    return said(true, `Changed "${was}" to "${op.text.trim()}" on "${note.title}".`);
+  }
+
+  // the one thing here that really goes. a step is part of its task rather than a row of
+  // its own, so there is no archive for it to sit in - same as the x on it in the board
+  if (op.type === "removeStep") {
+    const found = findStep(note, op.step ?? "");
+    if (found.error) return said(false, found.error);
+
+    const under = found.row!.items.length;
+    const checklists = dropNoteItem(note.checklists, found.row!.id);
+    await updateNote(note.id, { checklists, updatedAt: stamp() });
+
+    const tail = under ? ` and the ${under} step${under === 1 ? "" : "s"} under it` : "";
+    return said(true, `Removed "${found.row!.text}"${tail} from "${note.title}". That one is not recoverable.`);
+  }
+
   if (op.type === "archiveTask") {
-    await setNoteArchived(note.id, true);
-    return said(true, `Archived "${note.title}". It is in the archive if you want it back.`);
+    await setNoteArchived(note.id, !op.restore);
+    return said(true, op.restore
+      ? `Put "${note.title}" back on the board.`
+      : `Archived "${note.title}". It is in the archive if you want it back.`);
   }
 
   return said(false, `Nothing here knows how to "${op.type}".`);

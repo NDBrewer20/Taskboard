@@ -333,8 +333,93 @@ export const tools = [
   },
   {
     name: "taskboard_archive",
-    description: "Archive a task. It leaves the board but nothing is deleted, it can be restored.",
-    inputSchema: { type: "object", properties: { task: target, board: owner }, required: ["task"] },
+    description: "Take a task, a column or a whole board off the board. Nothing is deleted - archived things sit in "
+      + "the archive and come back with restore: true. Name one of task, column or board_name.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      column: { type: "string", description: "Archive this column and the tasks in it, instead of a task." },
+      board_name: { type: "string", description: "Archive this whole board, with its columns and their tasks." },
+      restore: { type: "boolean", description: "Put it back on the board instead. A column or task only reappears if what it sits in is not archived too." },
+      board: owner,
+    } },
+  },
+  {
+    name: "taskboard_rename_board",
+    description: "Rename a board.",
+    inputSchema: { type: "object", properties: {
+      name: { type: "string", description: "The new name." },
+      board: { type: "string", description: "Which board to rename. Defaults to the open board." },
+    }, required: ["name"] },
+  },
+  {
+    name: "taskboard_update_column",
+    description: "Rename a column or change its colour.",
+    inputSchema: { type: "object", properties: {
+      column: { type: "string", description: "The column to change." },
+      name: { type: "string", description: "The new name." },
+      color: { type: "string", description: "One of coral, teal, gold, violet, sky." },
+      board: owner,
+    }, required: ["column"] },
+  },
+  {
+    name: "taskboard_move_column",
+    description: "Move a column left or right on its board. Index 0 is the leftmost.",
+    inputSchema: { type: "object", properties: {
+      column: { type: "string" },
+      index: { type: "number", description: "Where it should end up, counting from 0." },
+      board: owner,
+    }, required: ["column", "index"] },
+  },
+  {
+    name: "taskboard_update_task",
+    description: "Change a task's title, its description, or what kind of note it is.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      title: { type: "string", description: "The new title." },
+      description: { type: "string", description: "The new description. An empty string clears it." },
+      note_type: { type: "string", description: "One of checklist, direction, descriptor, idea." },
+      board: owner,
+    }, required: ["task"] },
+  },
+  {
+    name: "taskboard_move_task",
+    description: "Move a task to another column, or up and down within the one it is in.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      column: { type: "string", description: "The column to move it to. Leave out to keep it where it is." },
+      index: { type: "number", description: "Where in the column, counting from 0. Leave out for the bottom." },
+      board: owner,
+    }, required: ["task"] },
+  },
+  {
+    name: "taskboard_add_checklist",
+    description: "Put another named checklist on a task, so its steps can be grouped.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      checklist: { type: "string", description: "What to call it." },
+      board: owner,
+    }, required: ["task", "checklist"] },
+  },
+  {
+    name: "taskboard_update_step",
+    description: "Reword a checklist step.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      step: { type: "string", description: "The step as it reads now." },
+      text: { type: "string", description: "What it should say instead." },
+      board: owner,
+    }, required: ["task", "step", "text"] },
+  },
+  {
+    name: "taskboard_remove_step",
+    description: "Take a checklist step off a task, along with any steps under it. A step is part of its task rather "
+      + "than a row of its own, so there is no archive for it to sit in - this one really is gone. Archive the task "
+      + "instead if you might want it back.",
+    inputSchema: { type: "object", properties: {
+      task: target,
+      step: { type: "string", description: "The step to remove." },
+      board: owner,
+    }, required: ["task", "step"] },
   },
 ];
 
@@ -351,7 +436,21 @@ async function call(name, args) {
     taskboard_add_task: () => ({ type: "createTask", ...args }),
     taskboard_add_step: () => ({ type: "addStep", ...args }),
     taskboard_complete: () => ({ type: "complete", ...args }),
-    taskboard_archive: () => ({ type: "archiveTask", task: args.task, board: args.board }),
+    // one tool for three levels, since "archive this" is the same thought whichever it is.
+    // board_name rather than board, because board already means which board to look on
+    taskboard_archive: () => ({
+      type: args.board_name ? "archiveBoard" : args.column ? "archiveColumn" : "archiveTask",
+      task: args.task, column: args.column, restore: args.restore === true,
+      board: args.board_name || args.board,
+    }),
+    taskboard_rename_board: () => ({ type: "renameBoard", name: args.name, board: args.board }),
+    taskboard_update_column: () => ({ type: "updateColumn", ...args }),
+    taskboard_move_column: () => ({ type: "moveColumn", ...args }),
+    taskboard_update_task: () => ({ type: "updateTask", ...args, noteType: args.note_type }),
+    taskboard_move_task: () => ({ type: "moveTask", ...args }),
+    taskboard_add_checklist: () => ({ type: "addChecklist", ...args }),
+    taskboard_update_step: () => ({ type: "updateStep", ...args }),
+    taskboard_remove_step: () => ({ type: "removeStep", ...args }),
   }[name];
 
   if (!op) return failed(`No tool called ${name}.`);

@@ -4,10 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "sync": "node server/api.mjs",
     "typecheck": "tsc -b",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:sync": "node server/roundtrip.test.mjs && node server/api.test.mjs && node server/converge.test.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.5",
