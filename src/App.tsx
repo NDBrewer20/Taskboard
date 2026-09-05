@@ -9,7 +9,7 @@ import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
   mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
-  setNoteArchived, sweepNote, updateColumn, updateNote } from "./db";
+  setNoteArchived, sweepNote, updateBoard, updateColumn, updateNote } from "./db";
 import { boardTemplates } from "./templates";
 import type { SyncStatus } from "./server";
 import { describeSync, holdSync, readKey, startSync, subscribe } from "./server";
@@ -23,7 +23,7 @@ const listText = (lists: Checklist[]) => lists
   .join(" ");
 
 // what is currently swapped out for a text box
-type Editing = { kind: "column" | "note" | "body" | "list" | "item" | "newColumn" | "newStep" | "newList"; id: string };
+type Editing = { kind: "board" | "column" | "note" | "body" | "list" | "item" | "newColumn" | "newStep" | "newList"; id: string };
 
 // the board, the archive and the walkthrough are three pages that take turns in the pane.
 // one value rather than a flag each, so two of them can never end up drawn on top of
@@ -609,6 +609,13 @@ function App() {
     await database.categories.add(buildColumn(activeBoard.id, name.trim(), columns.length)); refresh();
   }
 
+  async function renameBoard(board: Board, name: string) {
+    cancelEdit();
+    // a blank one backs out rather than leaving a board with no name on the sidebar
+    if (!name.trim() || name.trim() === board.name) return;
+    await updateBoard(board.id, { name: name.trim() }); refresh();
+  }
+
   async function renameColumn(category: Category, name: string) {
     cancelEdit();
     if (!name.trim() || name.trim() === category.name) return;
@@ -919,9 +926,18 @@ function App() {
       <div className="brand"><div className="brand-mark"><Layers3 size={18} /></div><span>Taskboard</span></div>
       <div className="sidebar-label">Your boards <button className="icon-button" onClick={openBoardDialog} aria-label="Add board"><Plus size={16} /></button></div>
       <nav className="board-list">
-        {liveBoards.map((board) => <button key={board.id} className={`board-button ${showBoard && activeBoard?.id === board.id ? "active" : ""}`} onClick={() => { openView("board"); setActiveBoardId(board.id); }}>
-          {board.name}<span className="note-count">{openCountFor(board.id)}</span>
-        </button>)}
+        {liveBoards.map((board) => <div key={board.id} className="board-row">
+          {isEditing("board", board.id)
+            ? <InlineInput value={board.name} placeholder="Board name"
+                onCommit={(text) => renameBoard(board, text)} onCancel={cancelEdit} />
+            : <>
+              <button className={`board-button ${showBoard && activeBoard?.id === board.id ? "active" : ""}`}
+                onClick={() => { openView("board"); setActiveBoardId(board.id); }}>
+                {board.name}<span className="note-count">{openCountFor(board.id)}</span>
+              </button>
+              <button className="icon-button" onClick={() => startEdit("board", board.id)} aria-label={`Rename ${board.name}`}><Pencil size={13} /></button>
+            </>}
+        </div>)}
       </nav>
       <div className="sidebar-bottom">
         <button className={`utility-button ${view === "archive" ? "active" : ""}`} onClick={() => openView(view === "archive" ? "board" : "archive")}>

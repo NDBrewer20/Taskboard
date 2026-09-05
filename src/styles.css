@@ -420,3 +420,11 @@ details.faint-note .command { margin-top: 8px; }
 .local-status.syncing span { background: var(--gold); }
 .local-status.offline span, .local-status.error span { background: var(--coral); }
 .local-status.error { color: var(--coral); }
+
+/* a board on the sidebar and the pencil that renames it. the pencil cannot live inside the
+   button, so the row holds the two of them and only shows it when you are on the row */
+.board-row { display: flex; align-items: center; gap: 2px; }
+.board-row .board-button { flex: 1; min-width: 0; }
+.board-row .icon-button { flex: 0 0 auto; opacity: 0; }
+.board-row:hover .icon-button, .board-row .icon-button:focus-visible { opacity: 1; }
+.board-row .inline-input { margin: 4px 0; }

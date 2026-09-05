@@ -69,7 +69,8 @@ Task
 
 Everything is edited in place. Clicking a note title, a description, a column name, "Add step",
 "Add description" or "New column" swaps that spot for a text box: enter saves, escape backs out,
-clicking away saves. Deleting a note asks in a small bar on the note itself.
+clicking away saves. A board is renamed the same way, from the pencil that appears on its row in
+the sidebar. Saving a blank name backs out rather than leaving a board with nothing on it. Deleting a note asks in a small bar on the note itself.
 
 Descriptions are the one multi-line field, so there enter makes a new line and **ctrl+enter** is
 what saves. Saving a blank one clears the description and the "Add description" button returns.
@@ -410,10 +411,6 @@ If you do want HTTPS anyway, put it on the reverse proxy, not this container.
 The stylesheet pulls DM Sans and Space Grotesk from Google Fonts, so a machine with no internet
 falls back to system fonts. Everything still works, it just looks different. Inline the fonts if
 that matters to you.
-
-## Still missing
-
-Renaming a board.
 
 ## Agents
 
