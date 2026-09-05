@@ -956,7 +956,7 @@ function App() {
         </button>
         <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
         <div className={`local-status ${sync?.state ?? ""}`}>
-          <span />{sync && syncKey ? describeSync(sync) : "Stored on this device"}
+          <span />{sync && syncKey ? describeSync(sync) : "Stored on the local Server."}
         </div>
       </div>
     </aside>
