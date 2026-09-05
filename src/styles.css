@@ -359,3 +359,6 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .connect-more code { font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace; font-size: 11px; color: var(--ink); }
 .faint-note { display: flex; align-items: baseline; gap: 7px; color: var(--faint) !important; }
 .note-count.live { background: rgba(122, 205, 179, .18); color: var(--teal); }
+
+/* the two ways of getting the tools to Claude */
+.save-connector { justify-self: start; display: flex; align-items: center; gap: 8px; padding: 10px 14px; }

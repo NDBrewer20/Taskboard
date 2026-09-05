@@ -2,7 +2,7 @@
   "mcpServers": {
     "taskboard": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bridge/mcp.mjs"]
+      "args": ["bridge/mcp.mjs"]
     }
   }
 }

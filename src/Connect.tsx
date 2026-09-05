@@ -2,11 +2,25 @@
 // rather than just telling you what to type, so you can see it come together.
 
 import { useState } from "react";
-import { ArrowLeft, Bot, Check, Copy, LoaderCircle, PlugZap, Terminal } from "lucide-react";
+import { ArrowLeft, Bot, Check, Copy, Download, LoaderCircle, PlugZap, Terminal } from "lucide-react";
 import type { BridgeHealth, OpResult } from "./bridge";
+// the connector, verbatim, so the board can hand you a copy. it is one file with no
+// imports and no dependencies for exactly this reason
+import connectorSource from "../bridge/mcp.mjs?raw";
 
-// where the plugin comes from. Claude Code fetches it itself, so nobody needs the folder
-const REPO = "NDBrewer20/Taskboard";
+const FILE = "taskboard-connector.mjs";
+
+// hands over the connector as a file. blobs are fine over plain http, unlike the clipboard
+function saveConnector() {
+  const url = URL.createObjectURL(new Blob([connectorSource], { type: "text/javascript" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = FILE;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 // clipboard writes need a secure context, and this gets self hosted over plain http, so
 // fall back to the old execCommand trick rather than have the button quietly do nothing
@@ -81,6 +95,13 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
   const claudeSeen = Boolean(bridge?.mcp);
   const connected = Boolean(bridge?.listening) && access;
 
+  // the real path, not a shortcut. Claude Code runs node directly rather than through a
+  // shell, so %USERPROFILE% or ~ would be handed over as literal text and node would give up
+  const windows = navigator.userAgent.includes("Win");
+  const saved = windows ? `C:/Users/you/Downloads/${FILE}` : `/home/you/Downloads/${FILE}`;
+  const addCommand = `claude mcp add taskboard -- node "${saved}"`;
+  const mcpJson = `{ "mcpServers": { "taskboard": { "command": "node", "args": ["${saved}"] } } }`;
+
 
   return <div className="connect-view">
     <div className="connect-intro">
@@ -96,17 +117,39 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
       <button className="ghost-button" onClick={onBack}><ArrowLeft size={16} />Back to the board</button>
     </div>
 
-    <Step index={1} done={claudeSeen} title="Add the plugin to Claude Code">
-      <p>Paste these into Claude Code, one after the other. It fetches everything itself, there is nothing to download or run.</p>
-      <Command text={`/plugin marketplace add ${REPO}`} />
-      <Command text="/plugin install taskboard@taskboard" note="Then restart Claude Code so it picks the tools up." />
+    <Step index={1} done={claudeSeen} title="Give Claude the tools">
+      <p>
+        The connector is one file with nothing around it and nothing to install. Save it, then tell Claude Code
+        where it went.
+      </p>
+      <button className="primary-button save-connector" onClick={saveConnector}><Download size={15} />Save the connector</button>
+
+      <p className="faint-note">Then say this to Claude Code. It knows where your Downloads are, so it can do the rest:</p>
+      <Command text={`Add the ${FILE} I just saved in my Downloads as an mcp server called taskboard`} />
+
+      <p className="faint-note">
+        <Terminal size={12} /> Or do it yourself, with the file's real path. Drag the file into the terminal to
+        paste it. A shortcut like <code>~</code> or <code>%USERPROFILE%</code> will not do, Claude Code runs node
+        straight rather than through a shell, so it would be handed over as literal text.
+      </p>
+      <Command text={addCommand} />
+      <p className="faint-note">
+        No terminal? Put the same thing in <code>.mcp.json</code> where you work, then approve it when Claude asks.
+      </p>
+      <Command text={mcpJson} />
+
       {claudeSeen
         ? <Chip state="on">Claude is connected</Chip>
         : up
           ? <Chip state="waiting">Connector found, but Claude has not used it yet</Chip>
           : <Chip state="waiting">Waiting for a Claude Code session</Chip>}
+      {!claudeSeen && <p className="faint-note">
+        Tools are picked up when a session starts, so start a new one afterwards. There is no need to restart your
+        editor. If it is a project <code>.mcp.json</code>, Claude asks you to approve it first.
+      </p>}
       {up && !claudeSeen && <p className="faint-note">
-        If Claude Code is running on a different computer to this browser, see the note at the bottom.
+        Claude Code has to be running on this computer, since the connector lives inside it and the board reaches
+        it on loopback.
       </p>}
     </Step>
 
@@ -145,18 +188,11 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
         two tasks match.
       </p>
 
-      <div className="field-label">Different computers?</div>
+      <div className="field-label">Where it runs</div>
       <p>
-        The connector runs inside Claude Code itself, on whatever machine Claude Code is on. Normally that is this
-        machine and there is nothing more to do. If you are reading the board on one computer and running Claude on
-        another, the browser cannot see the connector, so run one where the board is open and point Claude at it:
-      </p>
-      <Command text="node bridge/server.mjs" note="On the machine with the board open, from a copy of the repo." />
-      <Command text="TASKBOARD_BRIDGE=http://that-machine:4319" note="Set this for Claude Code, so its tools use that one instead of their own." />
-      <p className="faint-note">
-        <Terminal size={12} /> There is a plain command line version as well, handy for a hook:
-        <code> taskboard status</code>, <code>taskboard done "the login task"</code>. It sits beside the tools in the
-        plugin.
+        The connector runs inside Claude Code itself, on <code>127.0.0.1:4319</code>, and only while a session is
+        open. Nothing is written to disk, nothing leaves this machine, and the board still lives entirely in this
+        browser. Both halves have to be on the same computer.
       </p>
     </div>
   </div>;

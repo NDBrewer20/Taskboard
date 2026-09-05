@@ -8,8 +8,9 @@ import { allItems, buildBoard, buildChecklist, buildColumn, buildItem, buildNote
   setNoteArchived, updateNote } from "./db";
 import type { Board, Category, Checklist, ChecklistItem, Note } from "./types";
 
-// same origin first, which is what the docker setup proxies, then the local sidecar
-export const bridgeHosts = ["/bridge", "http://127.0.0.1:4319"];
+// the connector runs inside Claude Code on this machine, so there is only ever one place
+// to look. loopback, never anywhere else
+export const BRIDGE = "http://127.0.0.1:4319";
 
 export type BridgeOp = {
   id: string;
@@ -225,20 +226,13 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
 
 /* --- the loop the open tab runs while Claude access is on --- */
 
-// whichever host answered last time gets asked first, so it is one request in the normal case
-let host: string | null = null;
-
+// is the connector up. nothing is running when Claude Code is not, which is normal
 export async function findBridge(): Promise<{ base: string; info: BridgeHealth } | null> {
-  const order = host ? [host, ...bridgeHosts.filter((base) => base !== host)] : bridgeHosts;
+  try {
+    const info = await (await fetch(`${BRIDGE}/health`)).json() as BridgeHealth;
+    if (info?.ok) return { base: BRIDGE, info };
+  } catch { /* not up */ }
 
-  for (const base of order) {
-    try {
-      const info = await (await fetch(`${base}/health`)).json() as BridgeHealth;
-      if (info?.ok) { host = base; return { base, info }; }
-    } catch { /* try the next one */ }
-  }
-
-  host = null;
   return null;
 }
 

@@ -6,6 +6,3 @@ services:
     ports:
       - "8080:80"
     restart: unless-stopped
-    # so the /bridge proxy can reach the Claude Code connector running on the host
-    extra_hosts:
-      - "host.docker.internal:host-gateway"

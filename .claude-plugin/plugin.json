@@ -1,6 +1,0 @@
-{
-  "name": "taskboard",
-  "version": "1.0.0",
-  "description": "Read and drive a local Taskboard: add boards, columns and tasks, add checklist steps, and tick them off.",
-  "author": { "name": "ndbrewer" }
-}

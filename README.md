@@ -195,7 +195,8 @@ look like your boards vanished.
 docker compose up -d --build
 ```
 
-That builds the static files and serves them with nginx on port 8080. On Unraid either use the
+That builds the static files and serves them with nginx on port 8080. Nothing else runs in
+the container - there is no API and no database. On Unraid either use the
 **Docker Compose Manager** plugin pointed at a clone of this repo, or build the image once and add a
 container by hand. If you would rather not build on the server, run `npm run build` on your desktop
 and mount the resulting `dist/` into any static web container instead:
@@ -253,15 +254,26 @@ The board can be driven by Claude Code: it reads what is there, adds boards, col
 tasks, adds checklist steps under other steps, ticks things off and archives them.
 
 Open **Connect Claude** in the sidebar and it walks you through it, checking each step as it
-happens rather than just telling you what to type. There is nothing to download and nothing
-to keep running, so it works whether you cloned the repo or just opened the app:
+happens rather than just telling you what to type.
+
+The board hands you the connector, one file with no dependencies. Save it anywhere, then tell
+Claude Code where it went:
 
 ```
-/plugin marketplace add NDBrewer20/Taskboard
-/plugin install taskboard@taskboard
+Add the taskboard-connector.mjs I just saved in my Downloads as an mcp server called taskboard
 ```
 
-Restart Claude Code, switch on Claude access in the walkthrough, done.
+Or do it yourself, with the file's real path:
+
+```bash
+claude mcp add taskboard -- node "C:/Users/you/Downloads/taskboard-connector.mjs"
+```
+
+A shortcut like `~` or `%USERPROFILE%` will not do. Claude Code runs node straight rather than
+through a shell, so it would be handed over as literal text.
+
+Then start a new Claude Code session so it picks the tools up, and switch on Claude access in
+the walkthrough.
 
 ### How it hangs together
 
@@ -270,23 +282,13 @@ the open tab pulls it every couple of seconds and applies it through the same bu
 UI uses, then posts the board back so Claude can read it. Nothing is written to disk.
 
 The connector runs **inside the MCP server's own process**, which is why nobody has to start
-it. Whichever Claude session gets the port hosts it and the rest share it, and it binds to
-loopback. The plugin files are plain `.mjs` with no dependencies, so installing the plugin
-is all it takes - no install step, no build.
+it. Whichever Claude session gets the port hosts it and the rest share it. It binds to
+loopback on `127.0.0.1:4319` and there is no remote mode, so Claude Code and the browser have
+to be on the same computer.
 
 The tab has to be open for changes to land. If it is not, the tools say so rather than
 failing quietly.
 
-- `bridge/hub.mjs` the connector itself
-- `bridge/mcp.mjs` the MCP server, which hosts the hub and is what the plugin runs
-- `bridge/server.mjs` the hub on its own, only needed when the board is on another machine
-- `bridge/taskboard.mjs` the same thing from a terminal, for a hook or a quick check
+- `bridge/mcp.mjs` all of it, the connector and the MCP server. one file with no imports,
+  because the app serves a copy of it straight out of the bundle
 - `src/bridge.ts` the board's half, the loop and the ops
-
-### If the board and Claude are on different machines
-
-The browser has to be able to reach the connector, and the connector lives wherever Claude
-Code is. If the board is open on another computer, run `node bridge/server.mjs` there and
-point Claude at it with `TASKBOARD_BRIDGE=http://that-machine:4319`. Docker installs also
-get `/bridge` proxied to the host by nginx, so a connector on the docker host is reachable
-same origin.
