@@ -31,7 +31,7 @@ export type BridgeOp = {
 
 export type OpResult = { id: string; ok: boolean; message: string };
 
-export type BridgeHealth = { ok: boolean; port?: number; root?: string; listening?: boolean; mcp?: boolean; message?: string };
+export type BridgeHealth = { ok: boolean; port?: number; root?: string; listening?: boolean; mcp?: boolean; waits?: boolean; message?: string };
 
 // what the board looks like to the agent. names, not ids, are how it addresses things
 type StepView = { id: string; text: string; done: boolean; steps: StepView[] };
@@ -255,9 +255,15 @@ export async function currentView(boardId: string): Promise<BoardView | null> {
   return snapshot(board, boards, columns, notes);
 }
 
-// one round of it: take what is queued, apply it, hand back the board and what happened
-export async function pump(base: string, boardId: string): Promise<OpResult[]> {
-  const pulled = await (await fetch(`${base}/ops`)).json() as { ops?: BridgeOp[]; wantState?: boolean };
+// one round of it: take what is queued, apply it, hand back the board and what happened.
+//
+// waitMs asks the connector to hold the line for that long rather than answer empty handed.
+// a tab you are not looking at gets its timers cut to about one a minute, so polling on a
+// timer is what makes an agent time out on a board buried in tabs. a held request is not a
+// timer. only the pull carries the signal - cutting the sync short would lose what happened
+export async function pump(base: string, boardId: string, waitMs = 0, signal?: AbortSignal): Promise<OpResult[]> {
+  const held = waitMs > 0 ? `?wait=${waitMs}` : "";
+  const pulled = await (await fetch(`${base}/ops${held}`, { signal })).json() as { ops?: BridgeOp[]; wantState?: boolean };
   const results: OpResult[] = [];
 
   // one at a time, a later op can depend on what an earlier one made

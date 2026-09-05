@@ -48,10 +48,32 @@ export function startHub(port = PORT, host = "127.0.0.1") {
   let lastPoll = 0;
   let lastHello = 0;
 
+  // polls being held open, waiting for something to turn up for the tab
+  const waiting = new Set();
+
   const now = () => Date.now();
 
-  // the tab counts as listening if it has asked for work in the last few seconds
-  const listening = () => now() - lastPoll < 6000;
+  // the tab counts as listening if it has asked for work in the last few seconds, or if it
+  // is sat on the line right now waiting for some
+  const listening = () => waiting.size > 0 || now() - lastPoll < 6000;
+
+  // lets go of every held poll, so work queued reaches the tab straight away
+  const wake = () => { for (const release of [...waiting]) release(); };
+
+  // holds one poll open until there is work, the wait runs out, or the tab goes away
+  function hold(ms, request) {
+    return new Promise((done) => {
+      const release = () => {
+        clearTimeout(timer);
+        waiting.delete(release);
+        request.off("close", release);
+        done();
+      };
+      const timer = setTimeout(release, ms);
+      waiting.add(release);
+      request.on("close", release);
+    });
+  }
 
   function send(response, status, body) {
     const payload = JSON.stringify(body);
@@ -104,6 +126,9 @@ export function startHub(port = PORT, host = "127.0.0.1") {
         return send(response, 200, {
           ok: true, service: "taskboard-bridge", port,
           root: process.cwd(), listening: listening(), queued: queue.length,
+          // the tab checks this before asking us to hold a poll open, so an older board
+          // and a newer connector still work together, just by polling
+          waits: true,
           // set by whoever started the hub, so the walkthrough can say an agent is here
           mcp: now() - lastHello < 600_000,
           board: snapshot?.board ?? null, seenAt: snapshotAt || null,
@@ -130,6 +155,7 @@ export function startHub(port = PORT, host = "127.0.0.1") {
 
         const op = { id: `op_${now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, at: now(), ...body };
         queue.push(op);
+        wake();
         return send(response, 200, { ok: true, pending: true, id: op.id });
       }
 
@@ -141,8 +167,20 @@ export function startHub(port = PORT, host = "127.0.0.1") {
         return send(response, 200, { ...result, pending: false });
       }
 
-      // the tab pulls its work, and says whether the snapshot needs refreshing
+      // the tab pulls its work here, and says whether the snapshot needs refreshing.
+      //
+      // it can ask us to hold the line rather than come back in a couple of seconds. a tab
+      // that is not the one you are looking at has its timers cut to about one a minute by
+      // the browser, which is what makes an agent time out waiting on a board buried in a
+      // pile of tabs. a request held open is not a timer, so it gets answered either way
       if (route === "GET /ops") {
+        lastPoll = now();
+        const wait = Math.min(Number(url.searchParams.get("wait")) || 0, 30_000);
+        if (wait > 0 && !queue.length) await hold(wait, request);
+        // the tab may well have gone while we were holding, so nothing is taken off the
+        // queue for a connection that is not there to receive it
+        if (response.writableEnded || request.destroyed) return;
+
         lastPoll = now();
         const taking = queue.splice(0, queue.length);
         return send(response, 200, { ok: true, ops: taking, wantState: !snapshot || now() - snapshotAt > 10_000 });
@@ -193,9 +231,10 @@ export async function state() {
   try { return await (await fetch(`${BASE}/state`)).json(); } catch (error) { return offline(error); }
 }
 
-// queue an op, then hang about for the tab to apply it. the tab polls every couple of
-// seconds, so a few seconds of waiting is normal rather than a sign anything is wrong
-export async function run(op, waitMs = 12_000) {
+// queue an op, then hang about for the tab to apply it. the tab is sat on an open poll
+// while it is in the background and polls every couple of seconds while it is not, so an
+// answer normally comes back within a second either way
+export async function run(op, waitMs = 20_000) {
   let queued;
   try {
     queued = await (await fetch(`${BASE}/ops`, {
@@ -214,7 +253,15 @@ export async function run(op, waitMs = 12_000) {
     } catch (error) { return offline(error); }
   }
 
-  return { ok: false, message: "The board did not answer in time. Is the tab still open?" };
+  // no answer. a tab that is not there and a tab that is there but too throttled to answer
+  // need different things doing about them, and the health check knows which this is
+  const info = await health();
+  if (info?.listening) return { ok: false, message:
+    "The board is open but did not answer in time. If it is buried in a pile of tabs the browser "
+    + "will have cut its timers right back - click the Taskboard tab to bring it to the front, or "
+    + "save the connector again if you are on an older copy of it." };
+
+  return { ok: false, message: "The board did not answer in time. Is the tab still open with Agent access on?" };
 }
 
 /* ---------------------------------------------------------------- the tools */

@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, PlugZap, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowDownUp, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, PlugZap, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
 import Connect from "./Connect";
+import { useStayAwake } from "./awake";
+import ImportExport from "./ImportExport";
 import { findBridge, pump } from "./bridge";
 import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
@@ -67,6 +69,7 @@ type Settings = {
   rollUpSteps: boolean;
   compactRows: boolean;
   agentAccess: boolean;
+  stayAwake: boolean;
 };
 
 const defaultSettings: Settings = {
@@ -76,6 +79,8 @@ const defaultSettings: Settings = {
   compactRows: false,
   // off until you walk through Connect Agents, nothing reaches out on its own
   agentAccess: false,
+  // and off until you ask, since holding the screen open stops it locking itself
+  stayAwake: false,
 };
 
 const SETTINGS_KEY = "taskboard:settings";
@@ -128,6 +133,7 @@ function App() {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [view, setView] = useState<View>("board");
   const [showSettings, setShowSettings] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
   const [bridge, setBridge] = useState<BridgeHealth | null>(null);
   const [bridgeLog, setBridgeLog] = useState<OpResult[]>([]);
@@ -158,39 +164,85 @@ function App() {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  // with agent access on, the board asks the bridge for work every couple of seconds and
-  // applies whatever is waiting. nothing leaves the browser except the board it sends back
+  // with agent access on, the board asks the bridge for work and applies whatever is
+  // waiting. nothing leaves the browser except the board it sends back.
+  //
+  // one round at a time rather than an interval, because how long to leave before the next
+  // one depends on what the last one did. while you are looking at the tab it is the couple
+  // of seconds it always was. while you are not, the connector holds the poll open instead,
+  // since a background tab has its timers cut to roughly one a minute and an agent waiting
+  // on a board buried in a pile of tabs would time out long before the next one fired
   useEffect(() => {
     if (!settings.agentAccess) { setBridge(null); return; }
 
     let stopped = false;
     let busy = false;
+    let timer = 0;
+    let held: AbortController | null = null;
 
-    async function tick() {
+    async function round() {
       if (stopped || busy) return;
       busy = true;
+      let soon = 2000;
+
       try {
         const found = await findBridge();
         if (stopped) return;
         setBridge(found?.info ?? null);
         if (!found) return;
 
-        const done = await pump(found.base, openBoardRef.current);
-        if (stopped || !done.length) return;
+        // only hold the line when the tab is hidden. that is when the throttling happens,
+        // and when nobody is watching the walkthrough's chips go stale for half a minute.
+        // an older connector does not know how to hold one, so it says so in its health
+        const wait = found.info.waits && document.visibilityState !== "visible" ? 25_000 : 0;
+        held = new AbortController();
+        const done = await pump(found.base, openBoardRef.current, wait, held.signal);
+        if (stopped) return;
+
+        // a held poll has done the waiting already, so the next one goes straight back out
+        soon = wait ? 0 : 2000;
+        if (!done.length) return;
         setBridgeLog((current) => [...done].reverse().concat(current).slice(0, 20));
         refreshRef.current();
-      } catch { setBridge(null); } finally { busy = false; }
+      } catch {
+        // coming back to the tab cuts a held poll short on purpose, which is not a fault
+        if (held?.signal.aborted) soon = 0; else setBridge(null);
+      } finally {
+        held = null;
+        busy = false;
+        if (!stopped) timer = window.setTimeout(round, soon);
+      }
     }
 
-    tick();
-    const timer = window.setInterval(tick, 2000);
-    return () => { stopped = true; window.clearInterval(timer); };
+    // the tab you have just clicked back to should be up to date now, not in another
+    // half minute of held poll or, worse, whenever a throttled timer next gets a turn
+    function catchUp() {
+      if (stopped || document.visibilityState !== "visible") return;
+      held?.abort();
+      window.clearTimeout(timer);
+      round();
+    }
+
+    round();
+    document.addEventListener("visibilitychange", catchUp);
+    window.addEventListener("focus", catchUp);
+    return () => {
+      stopped = true;
+      held?.abort();
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", catchUp);
+      window.removeEventListener("focus", catchUp);
+    };
   }, [settings.agentAccess]);
+
+  // the screen only needs holding open while there is something to watch, so the lock
+  // follows agent access rather than the switch on its own
+  const awake = useStayAwake(settings.agentAccess && settings.stayAwake);
 
   // the topbar shows a ctrl+k hint, so make the key actually jump to search
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") { setIsCreating(false); setShowSettings(false); setConfirming(""); return; }
+      if (event.key === "Escape") { setIsCreating(false); setShowSettings(false); setShowTransfer(false); setConfirming(""); return; }
       if (event.key.toLowerCase() !== "k" || !(event.metaKey || event.ctrlKey)) return;
       event.preventDefault();
       searchInput.current?.focus();
@@ -861,6 +913,9 @@ function App() {
           <PlugZap size={17} />Connect Agents
           {settings.agentAccess && <span className={`note-count ${bridge?.listening ? "live" : ""}`}>{bridge?.listening ? "on" : "…"}</span>}
         </button>
+        <button className={`utility-button ${showTransfer ? "active" : ""}`} onClick={() => setShowTransfer(true)}>
+          <ArrowDownUp size={17} />Import &amp; export
+        </button>
         <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
         <div className="local-status"><span />Stored on this device</div>
       </div>
@@ -918,6 +973,7 @@ function App() {
       {view === "connect" && <Connect
         bridge={bridge} log={bridgeLog} access={settings.agentAccess}
         onAccess={() => toggleSetting("agentAccess")}
+        awake={awake} stayAwake={settings.stayAwake} onStayAwake={() => toggleSetting("stayAwake")}
         board={activeBoard?.name} column={columns[0]?.name}
         onBack={() => openView("board")} />}
 
@@ -1135,6 +1191,7 @@ function App() {
           {settingRow("compactRows", "Tighter spacing", "Less padding on the rows, so more of the column fits on screen.")}
           <div className="setting-actions">
             <button type="button" className="ghost-button small" onClick={() => { setShowSettings(false); openView("connect"); }}><PlugZap size={14} />Connect Agents</button>
+            <button type="button" className="ghost-button small" onClick={() => { setShowSettings(false); setShowTransfer(true); }}><ArrowDownUp size={14} />Import &amp; export</button>
             <button type="button" className="ghost-button small" onClick={expandEverything}><ChevronDown size={14} />Unfold everything</button>
             <button type="button" className="ghost-button small" onClick={resetColumnWidths}><Columns3 size={14} />Reset column widths</button>
           </div>
@@ -1145,6 +1202,16 @@ function App() {
         </div>
       </div>
     </div>}
+
+    {showTransfer && <ImportExport
+      boards={boards} categories={categories} notes={notes} activeBoardId={activeBoard?.id ?? ""}
+      onClose={() => setShowTransfer(false)}
+      onImported={async (boardId: string) => {
+        await refresh();
+        if (!boardId) return;
+        openView("board");
+        setActiveBoardId(boardId);
+      }} />}
 
     {isCreating && <div className="modal-overlay" onClick={() => setIsCreating(false)}>
       <form className="modal" onClick={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); createBoard(); }}>

@@ -2,47 +2,19 @@
 // rather than just telling you what to type, so you can see it come together.
 
 import { useState } from "react";
-import { ArrowLeft, Bot, Check, Copy, Download, LoaderCircle, PlugZap, Terminal } from "lucide-react";
+import { ArrowLeft, Bot, Check, Copy, Download, LoaderCircle, MonitorCheck, PlugZap, Terminal } from "lucide-react";
 import type { BridgeHealth, OpResult } from "./bridge";
+import type { AwakeState } from "./awake";
+import { browserGuide } from "./browser";
+import { copyText, saveFile } from "./transfer";
 // the connector, verbatim, so the board can hand you a copy. it is one file with no
 // imports and no dependencies for exactly this reason
 import connectorSource from "../bridge/mcp.mjs?raw";
 
 const FILE = "taskboard-connector.mjs";
 
-// hands over the connector as a file. blobs are fine over plain http, unlike the clipboard
-function saveConnector() {
-  const url = URL.createObjectURL(new Blob([connectorSource], { type: "text/javascript" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = FILE;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-// clipboard writes need a secure context, and this gets self hosted over plain http, so
-// fall back to the old execCommand trick rather than have the button quietly do nothing
-async function copyText(text: string) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* fall through */ }
-
-  try {
-    const holder = document.createElement("textarea");
-    holder.value = text;
-    holder.style.cssText = "position:fixed;top:-9999px;opacity:0";
-    document.body.appendChild(holder);
-    holder.select();
-    const done = document.execCommand("copy");
-    document.body.removeChild(holder);
-    return done;
-  } catch { return false; }
-}
+// hands over the connector as a file, the same way a board export goes out
+const saveConnector = () => saveFile(FILE, connectorSource, "text/javascript");
 
 function Command({ text, note }: { text: string; note?: string }) {
   const [copied, setCopied] = useState(false);
@@ -81,11 +53,23 @@ function Step({ index, done, title, children }: {
   </section>;
 }
 
-export default function Connect({ bridge, log, access, onAccess, board, column, onBack }: {
+// what the screen lock is actually doing, in the words of what it means for you
+const awakeWords: Record<AwakeState, { state: "on" | "waiting" | "off"; text: string }> = {
+  held: { state: "on", text: "The screen is being kept awake" },
+  paused: { state: "waiting", text: "Paused while this tab is in the background" },
+  blocked: { state: "off", text: "The browser took the lock back, battery saver usually" },
+  off: { state: "off", text: "Switched off" },
+  unsupported: { state: "off", text: "Not available over plain http, open the board on https or localhost" },
+};
+
+export default function Connect({ bridge, log, access, onAccess, awake, stayAwake, onStayAwake, board, column, onBack }: {
   bridge: BridgeHealth | null;
   log: OpResult[];
   access: boolean;
   onAccess: () => void;
+  awake: AwakeState;
+  stayAwake: boolean;
+  onStayAwake: () => void;
   board?: string;
   column?: string;
   onBack: () => void;
@@ -94,6 +78,15 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
   // the mcp server says hello when an agent starts it, so this is real rather than assumed
   const agentSeen = Boolean(bridge?.mcp);
   const connected = Boolean(bridge?.listening) && access;
+
+  // the lock follows agent access, so the switch being on is not the whole story
+  const screen = awake === "unsupported" ? awakeWords.unsupported
+    : !stayAwake ? null
+    : !access ? { state: "waiting" as const, text: "On, but nothing to stay awake for until agent access is" }
+    : awakeWords[awake];
+
+  // what this browser calls putting a tab to sleep, and where it keeps the way out of it
+  const guide = browserGuide();
 
   // the real path, not a shortcut. the connector is run as node directly rather than through
   // a shell, so %USERPROFILE% or ~ would be handed over as literal text and node would give up
@@ -155,6 +148,11 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
         The agent has to be running on this computer, since the connector lives inside it and the board reaches it
         on loopback.
       </p>}
+      {up && !bridge?.waits && <p className="faint-note">
+        <Terminal size={12} /> The connector answering is an older copy of the file. Save it again and start a new
+        agent session to get the held poll - that is what keeps this board answering while it sits behind a pile of
+        other tabs, instead of the agent timing out waiting on it.
+      </p>}
     </Step>
 
     <Step index={2} done={connected} title="Let this board listen">
@@ -169,6 +167,23 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
       {connected
         ? <Chip state="on">Connected</Chip>
         : access ? <Chip state="waiting">Waiting for an agent</Chip> : <Chip state="off">Switched off</Chip>}
+
+      <p className="faint-note">
+        <MonitorCheck size={12} /> Left running unattended, the display going to sleep usually takes the machine
+        with it and the board stops asking. This holds the screen open while agent access is on.
+      </p>
+      <button className={`setting-row ${stayAwake ? "on" : ""}`} role="switch" aria-checked={stayAwake}
+        onClick={onStayAwake} disabled={awake === "unsupported"}>
+        <span className="setting-what">
+          <strong>Keep the screen awake</strong>
+          <small>
+            Only while this tab is the one you are looking at. Switching away hands the lock back, and a tab in the
+            background gets throttled whatever this says.
+          </small>
+        </span>
+        <span className="switch"><span /></span>
+      </button>
+      {screen && <Chip state={screen.state}>{screen.text}</Chip>}
     </Step>
 
     <Step index={3} done={log.length > 0} title="Try it">
@@ -197,6 +212,32 @@ export default function Connect({ bridge, log, access, onAccess, board, column, 
         The connector runs inside the agent itself, on <code>127.0.0.1:4319</code>, and only while a session is
         open. Nothing is written to disk, nothing leaves this machine, and the board still lives entirely in this
         browser. Both halves have to be on the same computer.
+      </p>
+
+      <div className="field-label">While you are looking elsewhere</div>
+      <p>
+        A tab you are not looking at has its timers cut to about one a minute, which is why an agent used to time
+        out on a board buried in a pile of tabs. So the board stops using one: while it is in the background it
+        holds a poll open at the connector instead, and work comes back down it the moment the agent queues any.
+        Clicking back to the tab cuts that short and catches up on the spot.
+      </p>
+      <p>
+        The one thing that still stops it is the browser closing the tab down to save memory. <em>Give the board its
+        own window</em> and that never comes up: the tab on top of its own window counts as the one you are looking
+        at even when the window is behind everything else, so nothing throttles it, nothing discards it, and the
+        screen lock keeps working.
+      </p>
+
+      <div className="field-label">Or leave it among your tabs, in {guide.name}</div>
+      {guide.settings && <Command text={guide.settings} note="Paste it in the address bar. A settings page will not open from a link." />}
+      {guide.steps.length > 0 && <ol className="guide-steps">
+        {guide.steps.map((step) => <li key={step}>{step}</li>)}
+      </ol>}
+      {guide.perSite && <p className="faint-note">The site to add is <code>{location.host || "this site"}</code>.</p>}
+      {guide.note && <p className="faint-note">{guide.note}</p>}
+      <p className="faint-note">
+        If that is not the browser you are in, the same setting is somewhere in its settings under sleeping,
+        discarding or memory.
       </p>
     </div>
   </div>;

@@ -172,6 +172,31 @@ into IndexedDB directly. The schema is versioned:
 Version 3 exists only to drop the test rows from earlier development. Once you have loaded the app
 once it has already run, and the block can be deleted from `src/db.ts` before anyone else uses this.
 
+## Import and export
+
+**Import & export** in the sidebar moves boards off this browser and back again. The database is
+three flat tables, but a board only means anything with its columns and their notes attached, so
+`src/transfer.ts` works on that tree rather than the tables.
+
+Pick any boards, or all of them, and pick a format:
+
+- **JSON** — the whole tree, exactly as it is. The only one that imports back in.
+- **CSV** — a row per task for a spreadsheet. Checklists ride along as indented text in one cell,
+  and anything opening with `=` gets an apostrophe in front so it lands as text, not a formula.
+- **Markdown** — headings down to the task, steps as `- [x]` items. For pasting into notes or a repo.
+
+Archived columns and tasks are left out unless you switch them in, so what you hand over is the
+board as it looks now. An archived board you tick explicitly still exports.
+
+The file downloads as `taskboard-<board>-<date>.<ext>`. **Copy** puts the same text on the
+clipboard instead, for when a download is awkward — an embedded browser, say.
+
+Import takes the JSON one back. Drop the file on the zone, pick it, or paste its contents. It is
+parsed before anything is written, so you choose which of the boards in it to take, and a hand
+edited or older file falls back field by field rather than failing outright. Everything lands as
+new boards with fresh ids at the bottom of the sidebar — nothing already there is touched — and a
+name that is taken comes in as `(imported)`.
+
 ## Hosting it on Unraid
 
 The app is a pile of static files. There is no server, no API and no database on the host, so any
@@ -245,8 +270,7 @@ that matters to you.
 
 ## Still missing
 
-Renaming a board, and JSON export/import. Worth having before trusting this with anything you could
-not rebuild.
+Renaming a board.
 
 ## Agents
 
@@ -286,11 +310,68 @@ shell, so it would be handed over as literal text.
 Then start a new agent session so it picks the tools up, and switch on **Agent access** in the
 walkthrough.
 
+### Leaving it running
+
+Agent access polls every couple of seconds, which is no use if the display has gone to sleep and
+taken the machine with it. **Keep the screen awake** under agent access takes a screen wake lock
+while the two are on. What it does not do:
+
+- **It does not keep a hidden tab working.** The browser hands the lock back the moment the tab
+  stops being the visible one, and will not give it again until you are looking at the tab. A
+  minimised board still gets its timers throttled, lock or no lock. The chip under the switch says
+  `Paused` when that happens.
+- **It needs a secure context**, the same as `crypto.randomUUID` in `src/db.ts`. Over plain http
+  `navigator.wakeLock` does not exist at all, so on a self hosted board the switch is disabled and
+  says so. Open it on `localhost` or put it behind https to get it.
+
+The lock lives in `src/awake.ts` as `useStayAwake(active)`, and it listens for the browser taking
+the lock back rather than assuming it still holds it - battery saver drops it too.
+
+### Not getting the tab put to sleep
+
+Throttling is handled (see below), but a browser can also close a background tab down entirely to
+save memory. The way round that is not a setting at all: **give the board its own window**. The tab
+on top of its own window counts as visible even when the window is behind everything else, so
+nothing throttles it, nothing discards it, and the screen lock keeps working.
+
+If it has to live among your other tabs, Connect Agents prints the exemption for the browser you
+are actually in. `src/browser.ts` works out which that is and holds what each one needs:
+
+| Browser | Where | What |
+| --- | --- | --- |
+| Chrome | `chrome://settings/performance` | Memory Saver → Always keep these sites active |
+| Edge | `edge://settings/system` | Sleeping tabs → Never put these sites to sleep |
+| Brave | `brave://settings/performance` | Memory Saver → Always keep these sites active |
+| Opera, Vivaldi, other Chromium | its own settings | search for memory, snooze or hibernate |
+| Firefox | `about:config` | `browser.tabs.unloadOnLowMemory` → false. No per site list, so it is all or nothing |
+| Safari | nothing to do | it does not discard tabs this way |
+
+Detection is user agent order of business - nearly all of them still say `Chrome` somewhere, so
+Firefox, `Edg/`, `OPR/` and `Vivaldi` are checked before it. Brave is the awkward one: its user
+agent is deliberately identical to Chrome's and the only tell is `navigator.brave`. None of those
+settings pages open from a link, so the path is handed over as text to paste with a copy button.
+
 ### How it hangs together
 
 Everything still lives in the browser. A small connector holds the work the agent has queued,
-the open tab pulls it every couple of seconds and applies it through the same builders the
-UI uses, then posts the board back so the agent can read it. Nothing is written to disk.
+the open tab pulls it and applies it through the same builders the UI uses, then posts the board
+back so the agent can read it. Nothing is written to disk.
+
+How it pulls depends on whether you are looking at it. In front, it asks every couple of seconds,
+the way it always did. In the background it asks the connector to **hold the poll open** for up to
+25 seconds instead, and the connector answers it the instant an agent queues anything.
+
+That is not a nicety. A tab you are not looking at has its timers cut to roughly one a minute by
+the browser, so `setInterval` polling is exactly what made an agent time out on a board buried in a
+pile of tabs. A request held open is not a timer, so throttling does not touch it. Clicking back to
+the tab aborts the held poll and catches up on the spot rather than waiting it out.
+
+`GET /ops` takes an optional `?wait=<ms>`, capped at 30s, and `/health` advertises `waits: true`.
+Both halves check for it, so an old board with a new connector and a new board with an old
+connector both still work - they just fall back to polling. **If you saved the connector before
+this, save it again**; Connect Agents says so when it sees an old one answering. A tab sat on a
+held poll counts as listening, so ops queued while it waits are accepted rather than refused, and
+`run()` now tells the difference between no tab at all and a tab that is there but throttled.
 
 The connector runs **inside the MCP server's own process**, which is why nobody has to start
 it. Whichever agent session gets the port hosts it and the rest share it. It binds to
