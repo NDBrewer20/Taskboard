@@ -1,0 +1,11 @@
+{
+  "name": "taskboard",
+  "owner": { "name": "ndbrewer" },
+  "plugins": [
+    {
+      "name": "taskboard",
+      "source": "./",
+      "description": "Drive a local Taskboard from Claude Code: boards, columns, tasks, checklist steps."
+    }
+  ]
+}

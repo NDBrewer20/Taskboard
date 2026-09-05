@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "bridge": "node bridge/server.mjs",
+    "taskboard": "node bridge/taskboard.mjs",
     "typecheck": "tsc -b",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

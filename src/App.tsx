@@ -1,5 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Check, ChevronDown, ChevronRight, Circle, Columns3, Filter, GripVertical, Layers3, ListChecks, ListTree, Pencil, PlugZap, Plus, Search, Settings2, Sparkles, Square, SquareCheckBig, TextAlignStart, Trash2, X } from "lucide-react";
+import Connect from "./Connect";
+import { findBridge, pump } from "./bridge";
+import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
   mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
@@ -58,6 +61,7 @@ type Settings = {
   collapsedSteps: boolean;
   rollUpSteps: boolean;
   compactRows: boolean;
+  claudeAccess: boolean;
 };
 
 const defaultSettings: Settings = {
@@ -65,6 +69,8 @@ const defaultSettings: Settings = {
   collapsedSteps: true,
   rollUpSteps: true,
   compactRows: false,
+  // off until you walk through Connect Claude, nothing reaches out on its own
+  claudeAccess: false,
 };
 
 const SETTINGS_KEY = "taskboard:settings";
@@ -112,7 +118,10 @@ function App() {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchive, setShowArchive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showConnect, setShowConnect] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
+  const [bridge, setBridge] = useState<BridgeHealth | null>(null);
+  const [bridgeLog, setBridgeLog] = useState<OpResult[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [drag, setDrag] = useState<{ kind: DragKind; id: string; noteId: string; title: string; x: number; y: number; width: number; height: number; container: string; index: number } | null>(null);
   const [sizing, setSizing] = useState<{ id: string; width: number } | null>(null);
@@ -135,6 +144,40 @@ function App() {
 
   useEffect(() => { database.open().then(refresh); }, []);
 
+  // which board changes land on, read at tick time rather than captured when the loop started
+  const openBoardRef = useRef("");
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // with Claude access on, the board asks the bridge for work every couple of seconds and
+  // applies whatever is waiting. nothing leaves the browser except the board it sends back
+  useEffect(() => {
+    if (!settings.claudeAccess) { setBridge(null); return; }
+
+    let stopped = false;
+    let busy = false;
+
+    async function tick() {
+      if (stopped || busy) return;
+      busy = true;
+      try {
+        const found = await findBridge();
+        if (stopped) return;
+        setBridge(found?.info ?? null);
+        if (!found) return;
+
+        const done = await pump(found.base, openBoardRef.current);
+        if (stopped || !done.length) return;
+        setBridgeLog((current) => [...done].reverse().concat(current).slice(0, 20));
+        refreshRef.current();
+      } catch { setBridge(null); } finally { busy = false; }
+    }
+
+    tick();
+    const timer = window.setInterval(tick, 2000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [settings.claudeAccess]);
+
   // the topbar shows a ctrl+k hint, so make the key actually jump to search
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -150,6 +193,8 @@ function App() {
   // archived things drop out of the board until they are restored
   const liveBoards = boards.filter((board) => !board.archivedAt);
   const activeBoard = liveBoards.find((board) => board.id === activeBoardId) ?? liveBoards[0];
+
+  openBoardRef.current = activeBoard?.id ?? "";
 
   const archivedBoards = boards.filter((board) => board.archivedAt);
   const archivedColumns = categories.filter((category) => category.archivedAt);
@@ -551,6 +596,13 @@ function App() {
     setShowArchive(false); setPicked(new Set()); setConfirming("");
   }
 
+  // the board, the archive and the walkthrough take turns in the same pane
+  const showBoard = !showArchive && !showConnect;
+
+  function openConnect() {
+    setShowArchive(false); setPicked(new Set()); setConfirming(""); setShowConnect(true);
+  }
+
   // boards go first, so a cascade cleans up anything else that was picked underneath.
   // deleting a row that a cascade already removed is a no op, which keeps this simple.
   async function deletePicked() {
@@ -789,13 +841,17 @@ function App() {
       <div className="brand"><div className="brand-mark"><Layers3 size={18} /></div><span>Taskboard</span></div>
       <div className="sidebar-label">Your boards <button className="icon-button" onClick={openBoardDialog} aria-label="Add board"><Plus size={16} /></button></div>
       <nav className="board-list">
-        {liveBoards.map((board) => <button key={board.id} className={`board-button ${!showArchive && activeBoard?.id === board.id ? "active" : ""}`} onClick={() => { leaveArchive(); setActiveBoardId(board.id); }}>
+        {liveBoards.map((board) => <button key={board.id} className={`board-button ${!showArchive && activeBoard?.id === board.id ? "active" : ""}`} onClick={() => { leaveArchive(); setShowConnect(false); setActiveBoardId(board.id); }}>
           {board.name}<span className="note-count">{openCountFor(board.id)}</span>
         </button>)}
       </nav>
       <div className="sidebar-bottom">
         <button className={`utility-button ${showArchive ? "active" : ""}`} onClick={() => { if (showArchive) leaveArchive(); else setShowArchive(true); }}>
           <Archive size={17} />Archive{archivedCount > 0 && <span className="note-count">{archivedCount}</span>}
+        </button>
+        <button className={`utility-button ${showConnect ? "active" : ""}`} onClick={openConnect}>
+          <PlugZap size={17} />Connect Claude
+          {settings.claudeAccess && <span className={`note-count ${bridge?.listening ? "live" : ""}`}>{bridge?.listening ? "on" : "…"}</span>}
         </button>
         <button className={`utility-button ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(true)}><Settings2 size={17} />Settings</button>
         <div className="local-status"><span />Stored on this device</div>
@@ -804,7 +860,7 @@ function App() {
 
     <section className="content">
       <header className="topbar">
-        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{showArchive ? "Archive" : activeBoard?.name ?? "No boards"}</strong></div>
+        <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{showArchive ? "Archive" : showConnect ? "Connect Claude" : activeBoard?.name ?? "No boards"}</strong></div>
         <div className="top-actions">
           <div className="search-box">
             <Search size={17} />
@@ -818,11 +874,15 @@ function App() {
       <div className="board-heading">
         <div>
           <div className="eyebrow"><Sparkles size={14} />Personal workspace</div>
-          <h1>{showArchive ? "Archive" : activeBoard?.name ?? "No boards yet"}</h1>
-          <p>{showArchive ? "Put things back, or clear them out for good." : "Keep the signal visible. Let the rest wait."}</p>
+          <h1>{showArchive ? "Archive" : showConnect ? "Connect Claude" : activeBoard?.name ?? "No boards yet"}</h1>
+          <p>{showArchive ? "Put things back, or clear them out for good."
+            : showConnect ? "Let Claude Code add tasks and tick them off for you."
+            : "Keep the signal visible. Let the rest wait."}</p>
         </div>
         {showArchive
           ? <button className="ghost-button" onClick={leaveArchive}><ArrowLeft size={16} />Back to the board</button>
+          : showConnect
+          ? <button className="ghost-button" onClick={() => setShowConnect(false)}><ArrowLeft size={16} />Back to the board</button>
           : activeBoard
             ? <div className="heading-actions">
                 <button className="icon-button" onClick={() => archiveBoard(activeBoard)} aria-label={`Archive ${activeBoard.name}`} title="Archive this board"><Archive size={17} /></button>
@@ -831,7 +891,7 @@ function App() {
             : <button className="primary-button" onClick={openBoardDialog}><Plus size={17} />New board</button>}
       </div>
 
-      {activeBoard && !showArchive && <div className="toolbar">
+      {activeBoard && showBoard && <div className="toolbar">
         <div className="board-stats">
           <span>{shownColumns.length} columns</span><span className="stat-divider" />
           <span>{boardNotes.length} notes</span><span className="stat-divider" />
@@ -842,12 +902,18 @@ function App() {
         </button>
       </div>}
 
-      {!activeBoard && !showArchive && <div className="empty-board">
+      {!activeBoard && showBoard && <div className="empty-board">
         <div className="empty-mark"><Columns3 size={22} /></div>
         <strong>Nothing here yet</strong>
         <p>Create a board and pick a template. The columns come with it.</p>
         <button className="primary-button" onClick={openBoardDialog}><Plus size={17} />New board</button>
       </div>}
+
+      {showConnect && <Connect
+        bridge={bridge} log={bridgeLog} access={settings.claudeAccess}
+        onAccess={() => toggleSetting("claudeAccess")}
+        board={activeBoard?.name} column={columns[0]?.name}
+        onBack={() => setShowConnect(false)} />}
 
       {showArchive && <div className="archive-view">
         {!archivedCount && <div className="empty-board">
@@ -911,7 +977,7 @@ function App() {
         </p>}
       </div>}
 
-      {activeBoard && !showArchive && <div className={`board-columns ${settings.compactRows ? "compact" : ""}`} ref={boardRef} data-board-id={activeBoard.id}>
+      {activeBoard && showBoard && <div className={`board-columns ${settings.compactRows ? "compact" : ""}`} ref={boardRef} data-board-id={activeBoard.id}>
         {laidOutColumns.map((category, columnIndex) => {
           const rows = rowsFor(category.id).filter((note) => !(drag?.kind === "note" && note.id === drag.id));
           const slotAt = (index: number) => drag?.kind === "note" && drag.container === category.id && drag.index === index;
@@ -1062,6 +1128,7 @@ function App() {
         <div className="setting-group">
           {settingRow("compactRows", "Tighter spacing", "Less padding on the rows, so more of the column fits on screen.")}
           <div className="setting-actions">
+            <button type="button" className="ghost-button small" onClick={() => { setShowSettings(false); openConnect(); }}><PlugZap size={14} />Connect Claude Code</button>
             <button type="button" className="ghost-button small" onClick={expandEverything}><ChevronDown size={14} />Unfold everything</button>
             <button type="button" className="ghost-button small" onClick={resetColumnWidths}><Columns3 size={14} />Reset column widths</button>
           </div>
