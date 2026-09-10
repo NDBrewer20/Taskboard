@@ -8,7 +8,7 @@ import { findBridge, pump } from "./bridge";
 import type { BridgeHealth, OpResult } from "./bridge";
 import { allItems, buildChecklist, buildColumn, buildItem, buildNote, clampColumnWidth, createBoardFromTemplate,
   database, defaultColumnWidth, deleteBoardForever, deleteColumnForever, deleteNoteForever, dropNoteItem, findItem,
-  mapItems, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
+  mapItems, moveBoard, moveColumn, moveNote, noteItems, placeNoteItem, rollUpNote, setBoardArchived, setColumnArchived,
   setNoteArchived, sweepNote, updateBoard, updateColumn, updateNote } from "./db";
 import { boardTemplates } from "./templates";
 import type { SyncStatus } from "./server";
@@ -30,8 +30,9 @@ type Editing = { kind: "board" | "column" | "note" | "body" | "list" | "item" | 
 // each other the way they did when leaving one did not turn the other off
 type View = "board" | "archive" | "connect" | "sync";
 
-// notes move between columns, steps and whole checklists within a note, columns across the board
-type DragKind = "note" | "item" | "column" | "list";
+// notes move between columns, steps and whole checklists within a note, columns across the
+// board, and boards up and down the sidebar
+type DragKind = "note" | "item" | "column" | "list" | "board";
 
 // one text box that commits on enter or blur and backs out on escape
 function InlineInput({ value = "", placeholder, multiline = false, onCommit, onCancel }: {
@@ -130,6 +131,7 @@ function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeBoardId, setActiveBoardId] = useState("");
   const [query, setQuery] = useState("");
+  const [boardQuery, setBoardQuery] = useState("");
   const [showCompleted, setShowCompleted] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -152,7 +154,10 @@ function App() {
   const searchInput = useRef<HTMLInputElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
   const pending = useRef<{ kind: DragKind; id: string; noteId: string; title: string; width: number; height: number; startX: number; startY: number; active: boolean } | null>(null);
-  const target = useRef<{ container: string; index: number } | null>(null);
+  // index is what draws the gap, before is the row the move actually lands in front of.
+  // they are not the same thing - the index counts the rows on screen, and a search or
+  // active only can be hiding rows that are still sat in the column
+  const target = useRef<{ container: string; index: number; before: string | null } | null>(null);
   const pointer = useRef({ x: 0, y: 0 });
 
   async function refresh() {
@@ -263,11 +268,15 @@ function App() {
       if (event.key === "Escape") { setIsCreating(false); setShowSettings(false); setShowTransfer(false); setConfirming(""); return; }
       if (event.key.toLowerCase() !== "k" || !(event.metaKey || event.ctrlKey)) return;
       event.preventDefault();
-      searchInput.current?.focus();
+      // the box sits on the board toolbar now rather than the topbar, so from anywhere
+      // else come back to the board first and let it draw before reaching for the box
+      if (view === "board") { searchInput.current?.focus(); return; }
+      openView("board");
+      requestAnimationFrame(() => searchInput.current?.focus());
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [view]);
 
   // archived things drop out of the board until they are restored
   const liveBoards = boards.filter((board) => !board.archivedAt);
@@ -284,6 +293,29 @@ function App() {
   const columns = useMemo(
     () => categories.filter((category) => category.boardId === activeBoard?.id && !category.archivedAt),
     [categories, activeBoard?.id]);
+
+  const boardNeedle = boardQuery.trim().toLowerCase();
+  const searching = boardNeedle.length > 0;
+
+  // a board is in if its own name matches, or if a column or task sitting on it does.
+  // null means it is out, "" means the name itself is what matched, and anything else is
+  // what was found on the board - the name alone does not explain why it turned up
+  function boardHit(board: Board): string | null {
+    if (!searching) return "";
+    if (board.name.toLowerCase().includes(boardNeedle)) return "";
+    const own = categories.filter((category) => category.boardId === board.id && !category.archivedAt);
+    const column = own.find((category) => category.name.toLowerCase().includes(boardNeedle));
+    if (column) return `column ${column.name}`;
+    const ids = own.map((category) => category.id);
+    const found = notes.find((note) => !note.archivedAt && ids.includes(note.categoryId)
+      && `${note.title} ${note.content} ${listText(note.checklists)}`.toLowerCase().includes(boardNeedle));
+    return found ? found.title : null;
+  }
+
+  const shownBoards = liveBoards.map((board) => ({ board, hit: boardHit(board) })).filter((row) => row.hit !== null);
+
+  // the board being dragged leaves the list, so the slot index lines up with what is drawn
+  const laidOutBoards = shownBoards.filter(({ board }) => !(drag?.kind === "board" && board.id === drag.id));
 
   // search reaches the checklist names and their steps as well as the note itself
   const matches = useMemo(() => {
@@ -334,9 +366,15 @@ function App() {
     try { localStorage.setItem(COLLAPSE_KEY, "[]"); } catch { /* private mode, fine */ }
   }
 
-  // drops the width off every column, so they all go back to the default
+  // drops the width off every column, so they all go back to the default. only the ones
+  // that had one are touched, and they carry a stamp so the reset reaches the other devices
   async function resetColumnWidths() {
-    await database.categories.toCollection().modify((row) => { delete row.width; });
+    const now = new Date().toISOString();
+    await database.categories.toCollection().modify((row) => {
+      if (row.width === undefined) return;
+      delete row.width;
+      row.updatedAt = now;
+    });
     refresh();
   }
 
@@ -420,6 +458,11 @@ function App() {
     refresh();
   }
 
+  function beginBoardDrag(event: React.PointerEvent, board: Board) {
+    if (event.button !== 0) return;
+    pending.current = { kind: "board", id: board.id, noteId: "", title: board.name, ...measure(event, "[data-board-row]"), startX: event.clientX, startY: event.clientY, active: false };
+  }
+
   function beginColumnDrag(event: React.PointerEvent, category: Category) {
     if (event.button !== 0) return;
     pending.current = { kind: "column", id: category.id, noteId: "", title: category.name, ...measure(event, "[data-column-id]"), startX: event.clientX, startY: event.clientY, active: false };
@@ -433,30 +476,50 @@ function App() {
     return index === -1 ? rows.length : index;
   }
 
+  // the sidebar stacks its boards normally and runs them across on a narrow screen, so let
+  // the rows themselves say which way the slots go rather than repeating the breakpoint here
+  function rowAxis(rows: HTMLElement[]) {
+    if (rows.length < 2) return "y" as const;
+    return rows[1].getBoundingClientRect().top >= rows[0].getBoundingClientRect().bottom ? "y" as const : "x" as const;
+  }
+
   // works out what the pointer is over and where the dragged thing would slot in
   function findTarget(held: { kind: DragKind; id: string; noteId: string }, x: number, y: number) {
     const element = document.elementFromPoint(x, y);
     if (!element) return null;
 
+    if (held.kind === "board") {
+      const list = element.closest<HTMLElement>("[data-board-list]");
+      if (!list) return null;
+      const rows = [...list.querySelectorAll<HTMLElement>("[data-board-row]")].filter((row) => row.dataset.boardRow !== held.id);
+      const axis = rowAxis(rows);
+      const index = insertionPoint(rows, axis === "y" ? y : x, axis);
+      return { container: "boards", index, before: rows[index]?.dataset.boardRow ?? null };
+    }
+
     if (held.kind === "column") {
       const board = element.closest<HTMLElement>("[data-board-id]");
       if (!board) return null;
       const rows = [...board.querySelectorAll<HTMLElement>("[data-column-id]")].filter((row) => row.dataset.columnId !== held.id);
-      return { container: board.dataset.boardId!, index: insertionPoint(rows, x, "x") };
+      const index = insertionPoint(rows, x, "x");
+      return { container: board.dataset.boardId!, index, before: rows[index]?.dataset.columnId ?? null };
     }
 
     if (held.kind === "note") {
       const column = element.closest<HTMLElement>("[data-column-id]");
       if (!column || column.classList.contains("collapsed")) return null;
       const rows = [...column.querySelectorAll<HTMLElement>("[data-note-id]")].filter((row) => row.dataset.noteId !== held.id);
-      return { container: column.dataset.columnId!, index: insertionPoint(rows, y, "y") };
+      const index = insertionPoint(rows, y, "y");
+      return { container: column.dataset.columnId!, index, before: rows[index]?.dataset.noteId ?? null };
     }
 
+    // a checklist and a step sit in their note's own array, and nothing filters that, so
+    // for these two the slot on screen is the slot in the data and the index is enough
     if (held.kind === "list") {
       const owner = element.closest<HTMLElement>("[data-note-id]");
       if (!owner || owner.dataset.noteId !== held.noteId) return null;
       const rows = [...owner.querySelectorAll<HTMLElement>("[data-checklist-id]")].filter((row) => row.dataset.checklistId !== held.id);
-      return { container: owner.dataset.noteId!, index: insertionPoint(rows, y, "y") };
+      return { container: owner.dataset.noteId!, index: insertionPoint(rows, y, "y"), before: null };
     }
 
     // a step drops into whatever holds steps, a checklist or another step, anywhere on its
@@ -470,7 +533,7 @@ function App() {
     if (owner.closest<HTMLElement>("[data-note-id]")?.dataset.noteId !== held.noteId) return null;
     const rows = [...owner.querySelectorAll<HTMLElement>("[data-item-id]")]
       .filter((step) => step.dataset.itemId !== held.id && step.parentElement?.closest("[data-step-owner]") === owner);
-    return { container: owner.dataset.stepOwner!, index: insertionPoint(rows, y, "y") };
+    return { container: owner.dataset.stepOwner!, index: insertionPoint(rows, y, "y"), before: null };
   }
 
   useEffect(() => {
@@ -507,14 +570,20 @@ function App() {
       setDrag(null);
       if (!held?.active || !spot) return;
 
+      if (held.kind === "board") {
+        await moveBoard(held.id, spot.before);
+        refresh();
+        return;
+      }
+
       if (held.kind === "column") {
-        await moveColumn(held.id, spot.index);
+        await moveColumn(held.id, spot.before);
         refresh();
         return;
       }
 
       if (held.kind === "note") {
-        await moveNote(held.id, spot.container, spot.index);
+        await moveNote(held.id, spot.container, spot.before);
         refresh();
         return;
       }
@@ -565,7 +634,7 @@ function App() {
         if (x < box.left + 80) board.scrollLeft -= 14;
         else if (x > box.right - 80) board.scrollLeft += 14;
       }
-      const scroller = document.elementFromPoint(x, y)?.closest<HTMLElement>(".column-rows");
+      const scroller = document.elementFromPoint(x, y)?.closest<HTMLElement>(".column-rows, .board-list");
       if (scroller) {
         const box = scroller.getBoundingClientRect();
         if (y < box.top + 44) scroller.scrollTop -= 12;
@@ -925,19 +994,38 @@ function App() {
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Layers3 size={18} /></div><span>Taskboard</span></div>
       <div className="sidebar-label">Your boards <button className="icon-button" onClick={openBoardDialog} aria-label="Add board"><Plus size={16} /></button></div>
-      <nav className="board-list">
-        {liveBoards.map((board) => <div key={board.id} className="board-row">
-          {isEditing("board", board.id)
-            ? <InlineInput value={board.name} placeholder="Board name"
-                onCommit={(text) => renameBoard(board, text)} onCancel={cancelEdit} />
-            : <>
-              <button className={`board-button ${showBoard && activeBoard?.id === board.id ? "active" : ""}`}
-                onClick={() => { openView("board"); setActiveBoardId(board.id); }}>
-                {board.name}<span className="note-count">{openCountFor(board.id)}</span>
-              </button>
-              <button className="icon-button" onClick={() => startEdit("board", board.id)} aria-label={`Rename ${board.name}`}><Pencil size={13} /></button>
-            </>}
-        </div>)}
+      <div className="sidebar-search">
+        <Search size={14} />
+        <input value={boardQuery} onChange={(event) => setBoardQuery(event.target.value)} placeholder="Search boards" />
+        {searching && <button className="icon-button" onClick={() => setBoardQuery("")} aria-label="Clear the board search"><X size={14} /></button>}
+      </div>
+
+      <nav className="board-list" data-board-list>
+        {laidOutBoards.map(({ board, hit }, boardIndex) => <Fragment key={board.id}>
+          {drag?.kind === "board" && drag.index === boardIndex && <div className="drop-slot board" style={{ height: drag.height }} />}
+          <div className="board-entry" data-board-row={board.id}>
+            <div className="board-row">
+              {isEditing("board", board.id)
+                ? <InlineInput value={board.name} placeholder="Board name"
+                    onCommit={(text) => renameBoard(board, text)} onCancel={cancelEdit} />
+                : <>
+                  <button className={`board-button ${showBoard && activeBoard?.id === board.id ? "active" : ""}`}
+                    onClick={() => { openView("board"); setActiveBoardId(board.id); }}>
+                    {board.name}<span className="note-count">{openCountFor(board.id)}</span>
+                  </button>
+                  {/* the slot index is measured against the rows on screen, so reordering
+                      a filtered list would land the board somewhere else. no handle until
+                      the search is cleared and the whole list is back */}
+                  {!searching && <button className="icon-button drag-handle" onPointerDown={(event) => beginBoardDrag(event, board)} aria-label={`Move ${board.name}`}><GripVertical size={13} /></button>}
+                  <button className="icon-button" onClick={() => startEdit("board", board.id)} aria-label={`Rename ${board.name}`}><Pencil size={13} /></button>
+                </>}
+            </div>
+            {hit && <small className="board-hit">{hit}</small>}
+          </div>
+        </Fragment>)}
+
+        {drag?.kind === "board" && drag.index >= laidOutBoards.length && <div className="drop-slot board" style={{ height: drag.height }} />}
+        {searching && !shownBoards.length && <p className="board-empty">No boards match.</p>}
       </nav>
       <div className="sidebar-bottom">
         <button className={`utility-button ${view === "archive" ? "active" : ""}`} onClick={() => openView(view === "archive" ? "board" : "archive")}>
@@ -965,11 +1053,6 @@ function App() {
       <header className="topbar">
         <div className="breadcrumbs"><span>Workspace</span><span>/</span><strong>{view === "archive" ? "Archive" : view === "connect" ? "Connect Agents" : view === "sync" ? "Sync" : activeBoard?.name ?? "No boards"}</strong></div>
         <div className="top-actions">
-          <div className="search-box">
-            <Search size={17} />
-            <input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes" />
-            <kbd>Ctrl K</kbd>
-          </div>
           <button className="avatar" aria-label="Profile">N</button>
         </div>
       </header>
@@ -996,12 +1079,19 @@ function App() {
       {activeBoard && showBoard && <div className="toolbar">
         <div className="board-stats">
           <span>{shownColumns.length} columns</span><span className="stat-divider" />
-          <span>{boardNotes.length} notes</span><span className="stat-divider" />
+          <span>{boardNotes.length} tasks</span><span className="stat-divider" />
           <span>{boardNotes.filter((note) => note.completed).length} completed</span>
         </div>
-        <button className={`filter-button ${!showCompleted ? "selected" : ""}`} onClick={() => setShowCompleted(!showCompleted)}>
-          <Filter size={16} />{showCompleted ? "All notes" : "Active only"}
-        </button>
+        <div className="toolbar-tools">
+          <div className="search-box">
+            <Search size={16} />
+            <input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks" />
+            <kbd>Ctrl K</kbd>
+          </div>
+          <button className={`filter-button ${!showCompleted ? "selected" : ""}`} onClick={() => setShowCompleted(!showCompleted)}>
+            <Filter size={16} />{showCompleted ? "All tasks" : "Active only"}
+          </button>
+        </div>
       </div>}
 
       {!activeBoard && showBoard && <div className="empty-board">
@@ -1130,7 +1220,7 @@ function App() {
                       {note.completed ? <Check size={16} /> : <Circle size={16} />}
                     </button>
                     {isEditing("note", note.id)
-                      ? <InlineInput value={note.title} placeholder="Note title"
+                      ? <InlineInput value={note.title} placeholder="Task title"
                           onCommit={(text) => renameNote(note, text)} onCancel={cancelEdit} />
                       : <><button className="note-title" onClick={() => startEdit("note", note.id)}>{note.title}</button>
                           <button className="row-action drag-handle" onPointerDown={(event) => beginNoteDrag(event, note, true)} aria-label={`Move ${note.title}`}><GripVertical size={14} /></button>

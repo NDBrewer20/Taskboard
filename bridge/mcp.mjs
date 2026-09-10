@@ -280,10 +280,17 @@ const owner = { type: "string", description: "Which board the task is on. Defaul
 export const tools = [
   {
     name: "taskboard_board",
-    description: "Read the board: every column, task, and checklist step, with what is done. Start here so you know what exists before changing anything.",
+    description: "Read a board: every column, task, and checklist step, with what is done. Start here so you know what exists "
+      + "before changing anything. Leave the board out for the open one, or name any other board to read that instead.",
     inputSchema: { type: "object", properties: {
-      board: { type: "string", description: "Which board. Defaults to the one that is open." },
+      board: { type: "string", description: "Which board to read. Defaults to the one that is open." },
     } },
+  },
+  {
+    name: "taskboard_boards",
+    description: "List every board with its columns and how many tasks sit in each. Use it to find the board or column name "
+      + "you need before reading or changing anything, rather than guessing at one.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "taskboard_add_board",
@@ -424,13 +431,17 @@ export const tools = [
 ];
 
 async function call(name, args) {
-  if (name === "taskboard_board") {
+  // the open board is already cached here, so reading it costs nothing and works even
+  // between polls. any other board only the tab can see, so that one goes down as an op
+  if (name === "taskboard_board" && !args.board) {
     const board = await state();
     if (!board.ok) return failed(board.message ?? "No board has connected yet. Open Taskboard and switch on Agent access.");
     return text(JSON.stringify(board, null, 2));
   }
 
   const op = {
+    taskboard_board: () => ({ type: "readBoard", board: args.board }),
+    taskboard_boards: () => ({ type: "listBoards" }),
     taskboard_add_board: () => ({ type: "createBoard", name: args.name }),
     taskboard_add_column: () => ({ type: "createColumn", name: args.name, board: args.board }),
     taskboard_add_task: () => ({ type: "createTask", ...args }),
@@ -455,7 +466,9 @@ async function call(name, args) {
 
   if (!op) return failed(`No tool called ${name}.`);
   const result = await run(op());
-  return result.ok ? text(result.message ?? "Done.") : failed(result.message ?? "That did not work.");
+  if (!result.ok) return failed(result.message ?? "That did not work.");
+  // an op that was a question hands back what was asked for, the rest just say what they did
+  return text(result.data === undefined ? (result.message ?? "Done.") : JSON.stringify(result.data, null, 2));
 }
 
 /* ---------------------------------------------------------------- the protocol,

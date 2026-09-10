@@ -37,7 +37,9 @@ export type BridgeOp = {
   index?: number;
 };
 
-export type OpResult = { id: string; ok: boolean; message: string };
+// message is the line the walkthrough logs, data is for the ops that are a question
+// rather than a change - the board an agent asked to read comes back in here
+export type OpResult = { id: string; ok: boolean; message: string; data?: unknown };
 
 export type BridgeHealth = { ok: boolean; port?: number; root?: string; listening?: boolean; mcp?: boolean; waits?: boolean; message?: string };
 
@@ -160,9 +162,39 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
     return said(true, `Added the board "${op.name.trim()}".`);
   }
 
+  // what an agent asked for rather than changed. the line still says what happened, so
+  // the walkthrough's log stays readable instead of filling up with the board as json
+  const handed = (message: string, data: unknown) => ({ id: op.id, ok: true, message, data });
+
+  // every board with its columns and what is in them. this is how a name is found without
+  // having to be on the board already, which is the thing reading one board cannot do
+  if (op.type === "listBoards") {
+    const boards = (await database.boards.orderBy("position").toArray()).filter((row) => !row.archivedAt);
+    const notes = await database.notes.toArray();
+    const listed = await Promise.all(boards.map(async (row) => ({
+      name: row.name,
+      columns: (await columnsOf(row.id)).map((column) => {
+        const own = notes.filter((note) => note.categoryId === column.id && !note.archivedAt);
+        return { name: column.name, tasks: own.length, done: own.filter((note) => note.completed).length };
+      }),
+    })));
+    // which one an op that leaves out the board lands on, so it never has to be guessed at
+    return handed(`${listed.length} board${listed.length === 1 ? "" : "s"}.`,
+      { boards: listed, default: listed[0]?.name ?? null });
+  }
+
   const board = await boardFor(op.board, op.restore === true);
   if (board.error) return said(false, board.error);
   const boardId = board.row!.id;
+
+  // the same shape the open board is pushed up in, for whichever board was asked for.
+  // it has to come through the tab like this - the connector only ever caches the open one
+  if (op.type === "readBoard") {
+    const boards = await database.boards.orderBy("position").toArray();
+    const notes = await database.notes.orderBy("position").toArray();
+    return handed(`Read the board "${board.row!.name}".`,
+      snapshot(board.row!, boards, await columnsOf(boardId), notes));
+  }
 
   if (op.type === "createColumn") {
     if (!op.name?.trim()) return said(false, "A column needs a name.");
@@ -201,7 +233,10 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
 
     if (op.type === "moveColumn") {
       if (!Number.isFinite(op.index)) return said(false, "Which position should it go to?");
-      await moveColumn(column.id, Math.max(0, Math.trunc(op.index!)));
+      // an agent counts positions among the columns it was shown, which leaves out anything
+      // archived, so turn its number into the column the moved one should land in front of
+      const rest = pool.filter((row) => row.id !== column.id && !row.archivedAt);
+      await moveColumn(column.id, rest[Math.max(0, Math.trunc(op.index!))]?.id ?? null);
       return said(true, `Moved the column "${column.name}".`);
     }
 
@@ -328,11 +363,15 @@ export async function applyOp(op: BridgeOp): Promise<OpResult> {
       categoryId = found.row!.id;
     }
 
+    // same as the column above, and in position order - the table hands rows back in id
+    // order, so counting a position off an unsorted list would land it anywhere
     const sitting = (await database.notes.toArray())
-      .filter((row) => row.categoryId === categoryId && !row.archivedAt && row.id !== note.id);
-    const index = Number.isFinite(op.index) ? Math.max(0, Math.trunc(op.index!)) : sitting.length;
+      .filter((row) => row.categoryId === categoryId && !row.archivedAt && row.id !== note.id)
+      .sort((a, b) => a.position - b.position);
 
-    await moveNote(note.id, categoryId, index);
+    // no position asked for means the end of the column, which is what null is
+    const before = Number.isFinite(op.index) ? sitting[Math.max(0, Math.trunc(op.index!))]?.id ?? null : null;
+    await moveNote(note.id, categoryId, before);
     const where = op.column ? ` to ${op.column}` : "";
     return said(true, `Moved "${note.title}"${where}.`);
   }

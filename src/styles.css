@@ -39,7 +39,16 @@ h1, h2, p { margin: 0; }
 .icon-button { color: var(--faint); background: transparent; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; flex: 0 0 auto; }
 .icon-button:hover { background: var(--raised); color: var(--ink); }
 
+/* finds a board by its own name or by something on it, so it sits with the boards rather
+   than in the topbar where it would read as searching the open board */
+.sidebar-search { display: flex; align-items: center; gap: 8px; color: var(--faint); border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; margin-bottom: 10px; background: var(--surface); }
+.sidebar-search:focus-within { border-color: #3d3b4a; }
+.sidebar-search input { flex: 1; min-width: 0; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 12px; }
+.sidebar-search .icon-button { width: 20px; height: 20px; }
+
 .board-list { display: grid; gap: 5px; overflow-y: auto; min-height: 0; }
+.board-entry { min-width: 0; }
+.board-empty { color: var(--faint); font-size: 12px; padding: 7px 12px; }
 .board-button, .utility-button { display: flex; align-items: center; gap: 11px; color: var(--muted); text-align: left; background: transparent; border-radius: 8px; padding: 11px 12px; font-size: 14px; }
 .board-button:hover, .utility-button:hover { color: var(--ink); background: var(--raised); }
 .board-button.active { color: var(--ink); background: var(--raised); font-weight: 600; }
@@ -69,6 +78,7 @@ h1 { font-family: 'Space Grotesk'; font-size: clamp(30px, 3.4vw, 46px); line-hei
 
 .toolbar { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); height: 51px; display: flex; justify-content: space-between; align-items: center; }
 .board-stats { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 11px; }
+.toolbar-tools { display: flex; gap: 10px; align-items: center; }
 .stat-divider { height: 13px; width: 1px; background: var(--line); }
 .filter-button { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 11px; background: transparent; padding: 7px 9px; border-radius: 6px; }
 .filter-button:hover, .filter-button.selected { background: var(--raised); color: var(--ink); }
@@ -201,6 +211,7 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
 .drag-handle:active { cursor: grabbing; }
 .drop-slot { height: 62px; border: 1px dashed var(--coral); border-radius: 9px; background: rgba(240, 141, 120, .07); }
 .drop-slot.step { height: 21px; border-radius: 5px; }
+.drop-slot.board { border-radius: 8px; }
 .drag-ghost { position: fixed; z-index: 20; transform: translate(-42%, -60%); pointer-events: none; background: var(--raised); border: 1px solid var(--coral); border-radius: 9px; padding: 11px 14px; font-family: 'Space Grotesk'; font-size: 14px; font-weight: 600; color: var(--ink); box-shadow: 0 16px 34px rgba(0, 0, 0, .5); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .95; }
 .drag-ghost.step { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 400; padding: 7px 11px; }
 
@@ -280,7 +291,8 @@ textarea.inline-input { display: block; resize: vertical; min-height: 62px; font
   .sidebar { width: 100%; position: static; height: auto; padding: 18px 16px 13px; border-right: 0; border-bottom: 1px solid var(--line); }
   .brand { padding: 0 4px 18px; }
   .board-list { display: flex; overflow-x: auto; overflow-y: visible; }
-  .board-button { flex: 0 0 auto; }
+  .board-button, .board-entry { flex: 0 0 auto; }
+  .drop-slot.board { flex: 0 0 auto; width: 120px; height: auto; align-self: stretch; }
   .sidebar-label, .sidebar-bottom { display: none; }
   .content { padding: 0 15px 36px; }
   .topbar { height: 67px; }
@@ -421,10 +433,14 @@ details.faint-note .command { margin-top: 8px; }
 .local-status.offline span, .local-status.error span { background: var(--coral); }
 .local-status.error { color: var(--coral); }
 
-/* a board on the sidebar and the pencil that renames it. the pencil cannot live inside the
-   button, so the row holds the two of them and only shows it when you are on the row */
+/* a board on the sidebar with the grip that moves it and the pencil that renames it.
+   neither can live inside the button, so the row holds all three. they sit dim rather than
+   hidden, otherwise there is nothing to say the row does anything until you land on it */
 .board-row { display: flex; align-items: center; gap: 2px; }
 .board-row .board-button { flex: 1; min-width: 0; }
-.board-row .icon-button { flex: 0 0 auto; opacity: 0; }
+.board-row .icon-button { flex: 0 0 auto; opacity: .45; }
 .board-row:hover .icon-button, .board-row .icon-button:focus-visible { opacity: 1; }
 .board-row .inline-input { margin: 4px 0; }
+
+/* a board found by a column or task on it says what was hit, since its name did not */
+.board-hit { display: block; color: var(--faint); font-size: 10px; padding: 0 12px 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

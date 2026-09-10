@@ -287,8 +287,19 @@ export async function createBoardFromTemplate(template: BoardTemplate, name: str
   return board;
 }
 
-// drops a note into a column at a given index and renumbers what it lands among
-export async function moveNote(noteId: string, toCategoryId: string, toIndex: number) {
+/* Where something lands is given as the row it should go in front of, and null for the
+   end of the list. Not a number: the board draws only what is live, and a search or active
+   only can be hiding more on top of that, so a slot counted off the screen does not line up
+   with the rows in the table. Renumbering still runs over all of them, archived included,
+   so an archived row keeps its place in the order for when it comes back. */
+
+const slotFor = (rows: { id: string }[], beforeId: string | null) => {
+  const at = beforeId ? rows.findIndex((row) => row.id === beforeId) : -1;
+  return at === -1 ? rows.length : at;
+};
+
+// drops a note into a column in front of a given row and renumbers what it lands among
+export async function moveNote(noteId: string, toCategoryId: string, beforeId: string | null) {
   await database.transaction("rw", database.notes, async () => {
     const note = await database.notes.get(noteId);
     if (!note) return;
@@ -298,30 +309,49 @@ export async function moveNote(noteId: string, toCategoryId: string, toIndex: nu
         .filter((row) => row.id !== noteId)
         .sort((a, b) => a.position - b.position);
 
-    // only the moved note counts as touched, the rest just shuffle up or down
-    const renumber = (rows: Note[], categoryId: string) =>
-      Promise.all(rows.map((row, index) => row.position === index && row.categoryId === categoryId
+    // a row that did not actually shift is left alone. one that did carries a new stamp:
+    // position is synced state like anything else, and the server only takes a row that
+    // says it is newer, so without this a reorder never leaves the browser it was done in
+    const renumber = (rows: Note[], categoryId: string) => {
+      const now = new Date().toISOString();
+      return Promise.all(rows.map((row, index) => row.position === index && row.categoryId === categoryId
         ? undefined
-        : updateNote(row.id, { position: index, categoryId })));
+        : updateNote(row.id, { position: index, categoryId, updatedAt: now })));
+    };
 
     if (note.categoryId === toCategoryId) {
       const rows = await ordered(toCategoryId);
-      rows.splice(Math.max(0, Math.min(toIndex, rows.length)), 0, note);
+      rows.splice(slotFor(rows, beforeId), 0, note);
       await renumber(rows, toCategoryId);
       return;
     }
 
     const source = await ordered(note.categoryId);
     const target = await ordered(toCategoryId);
-    target.splice(Math.max(0, Math.min(toIndex, target.length)), 0, note);
+    target.splice(slotFor(target, beforeId), 0, note);
     await renumber(source, note.categoryId);
     await renumber(target, toCategoryId);
-    await updateNote(noteId, { updatedAt: new Date().toISOString() });
+  });
+}
+
+// reorders a board in the sidebar and renumbers the rest
+export async function moveBoard(boardId: string, beforeId: string | null) {
+  await database.transaction("rw", database.boards, async () => {
+    const board = await database.boards.get(boardId);
+    if (!board) return;
+
+    const rows = (await database.boards.toArray())
+      .filter((row) => row.id !== boardId)
+      .sort((a, b) => a.position - b.position);
+
+    rows.splice(slotFor(rows, beforeId), 0, board);
+    await Promise.all(rows.map((row, index) =>
+      row.position === index ? undefined : updateBoard(row.id, { position: index })));
   });
 }
 
 // reorders a column inside its board and renumbers the rest
-export async function moveColumn(categoryId: string, toIndex: number) {
+export async function moveColumn(categoryId: string, beforeId: string | null) {
   await database.transaction("rw", database.categories, async () => {
     const category = await database.categories.get(categoryId);
     if (!category) return;
@@ -330,7 +360,7 @@ export async function moveColumn(categoryId: string, toIndex: number) {
       .filter((row) => row.id !== categoryId)
       .sort((a, b) => a.position - b.position);
 
-    rows.splice(Math.max(0, Math.min(toIndex, rows.length)), 0, category);
+    rows.splice(slotFor(rows, beforeId), 0, category);
     await Promise.all(rows.map((row, index) =>
       row.position === index ? undefined : updateColumn(row.id, { position: index })));
   });

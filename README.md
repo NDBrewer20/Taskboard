@@ -420,7 +420,8 @@ tasks between columns, reworks checklists, ticks things off and archives them.
 
 | Tool | What |
 | --- | --- |
-| `taskboard_board` | read the whole board, with what is done |
+| `taskboard_boards` | list every board with its columns and how many tasks are in each |
+| `taskboard_board` | read a board, with what is done - the open one, or any other by name |
 | `taskboard_add_board` `taskboard_rename_board` | make a board, rename one |
 | `taskboard_add_column` `taskboard_update_column` `taskboard_move_column` | make a column, rename or recolour it, shift it left or right |
 | `taskboard_add_task` `taskboard_update_task` `taskboard_move_task` | make a task, change its title, description or type, move it between columns |
